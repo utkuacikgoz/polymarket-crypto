@@ -15,7 +15,7 @@ import requests
 
 from config import PolymarketGammaConfig, get_config
 from models import MarketSpec, MarketStatus, current_ts_ms
-from pubsub import TOPIC_MARKET_SPEC, publish
+from pubsub import TOPIC_MARKET_SPEC, TOPIC_MARKET_EXPIRED, publish
 from connectors.base import BaseConnector
 
 
@@ -315,18 +315,27 @@ class PolymarketGammaConnector(BaseConnector):
             return None
     
     def _cleanup_expired_events(self) -> None:
-        """Remove expired events from tracking."""
+        """Remove expired events from tracking and notify subscribers."""
         current_time_ms = current_ts_ms()
-        expired = []
+        expired_markets = []
         
         for event_id, market in list(self._current_events.items()):
             if market.expiry_ts_ms <= current_time_ms:
-                expired.append(event_id)
+                expired_markets.append(market)
                 del self._current_events[event_id]
                 self.logger.info(f"Event expired and removed: {event_id}")
         
-        if expired:
-            self.logger.debug(f"Cleaned up {len(expired)} expired events")
+        # Publish expired events so CLOB WS can unsubscribe
+        for market in expired_markets:
+            publish(TOPIC_MARKET_EXPIRED, market)
+            self.logger.info(
+                f"Published expired market: {market.market_id[:16]}...",
+                event_id=market.event_id,
+                market_id=market.market_id
+            )
+        
+        if expired_markets:
+            self.logger.debug(f"Cleaned up {len(expired_markets)} expired events")
     
     def force_refresh(self) -> Optional[MarketSpec]:
         """

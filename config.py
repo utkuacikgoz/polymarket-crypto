@@ -118,7 +118,7 @@ class PolymarketGammaConfig:
     
     # Series to subscribe to - tuple of (coin, duration) e.g., [("BTC", "15M"), ("ETH", "15M")]
     # Duration can be: "5M", "15M", "DAILY"
-    target_series: tuple = (("BTC", "15M"),)
+    target_series: tuple = (("ETH", "15M"),)
     
     # Maximum number of active events to track per series
     max_events_per_series: int = 3
@@ -135,17 +135,21 @@ class PolymarketGammaConfig:
         Env vars:
             POLYMARKET_SERIES: Comma-separated list like "BTC-15M,ETH-15M"
         """
-        # Parse series config (e.g., "BTC-15M,ETH-15M")
-        series_str = _get_env("POLYMARKET_SERIES", "BTC-15M")
-        target_series = []
-        for s in series_str.split(","):
-            s = s.strip().upper()
-            if "-" in s:
-                coin, duration = s.split("-", 1)
-                target_series.append((coin.strip(), duration.strip()))
+        # Parse series config from env, or use class default
+        series_str = _get_env("POLYMARKET_SERIES", "")
         
-        if not target_series:
-            target_series = [("BTC", "15M")]
+        if series_str:
+            # Parse from env var (e.g., "BTC-15M,ETH-15M")
+            target_series = []
+            for s in series_str.split(","):
+                s = s.strip().upper()
+                if "-" in s:
+                    coin, duration = s.split("-", 1)
+                    target_series.append((coin.strip(), duration.strip()))
+            target_series = tuple(target_series) if target_series else cls.target_series
+        else:
+            # Use class default
+            target_series = cls.target_series
         
         return cls(
             api_base_url=_get_env("POLYMARKET_GAMMA_API_URL", "https://gamma-api.polymarket.com"),
@@ -167,8 +171,6 @@ class PolymarketGammaConfig:
         SERIES_MAP = {
             ("BTC", "15M"): 10192,
             ("ETH", "15M"): 10191,
-            ("BTC", "5M"): 10684,
-            ("ETH", "5M"): 10685,  # Assumed pattern
             ("BTC", "DAILY"): 41,
             ("ETH", "DAILY"): 42,  # Assumed pattern
         }

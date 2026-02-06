@@ -15,7 +15,7 @@ import websocket
 
 from config import PolymarketClobConfig, get_config
 from models import MarketPriceTick, MarketSpec, SourceType, current_ts_ms
-from pubsub import TOPIC_POLYMARKET_PRICES, TOPIC_MARKET_SPEC, publish, subscribe, Subscription
+from pubsub import TOPIC_POLYMARKET_PRICES, TOPIC_MARKET_SPEC, TOPIC_MARKET_EXPIRED, publish, subscribe, Subscription
 from connectors.base import BaseConnector
 
 
@@ -61,8 +61,11 @@ class PolymarketClobWebSocketConnector(BaseConnector):
         # Token to series key mapping (e.g., "BTC-15M")
         self._token_to_series: Dict[str, str] = {}
         
-        # Market spec subscription
+        # Market spec subscription (for new markets)
         self._market_subscription: Optional[Subscription] = None
+        
+        # Expired market subscription (for cleanup)
+        self._expired_subscription: Optional[Subscription] = None
         
         # Thread for handling market spec updates
         self._market_watcher_thread: Optional[Thread] = None
@@ -76,7 +79,6 @@ class PolymarketClobWebSocketConnector(BaseConnector):
         
         # Last logged bid/ask to avoid duplicate logs
         self._last_logged_bbo: Dict[str, tuple] = {}  # token_id -> (bid, ask)
-        self._last_logged_time: Dict[str, float] = {}  # token_id -> timestamp (for throttling)
     
     @property
     def current_market(self) -> Optional[MarketSpec]:
@@ -154,14 +156,27 @@ class PolymarketClobWebSocketConnector(BaseConnector):
             
             tokens_to_unsub = tokens_to_remove - all_needed_tokens
             
-            # Clean up token mapping
+            # Clean up all token mappings for removed tokens
             for token in tokens_to_remove:
                 if token in self._token_to_market:
                     del self._token_to_market[token]
+                if token in self._token_to_side:
+                    del self._token_to_side[token]
+                if token in self._token_to_series:
+                    del self._token_to_series[token]
+                if token in self._last_prices:
+                    del self._last_prices[token]
+                if token in self._last_logged_bbo:
+                    del self._last_logged_bbo[token]
             
             if self._ws and self._connected and tokens_to_unsub:
                 self._unsubscribe_tokens(list(tokens_to_unsub))
                 self._subscribed_tokens -= tokens_to_unsub
+                self.logger.info(
+                    f"Unsubscribed from expired market tokens",
+                    market_id=market_id[:16] + "...",
+                    tokens_removed=len(tokens_to_unsub)
+                )
     
     def set_market(self, market: MarketSpec) -> None:
         """
@@ -179,6 +194,7 @@ class PolymarketClobWebSocketConnector(BaseConnector):
         # Start market spec watcher
         self._market_watcher_stop.clear()
         self._market_subscription = subscribe(TOPIC_MARKET_SPEC, f"{self.name}_market_watcher")
+        self._expired_subscription = subscribe(TOPIC_MARKET_EXPIRED, f"{self.name}_expired_watcher")
         self._market_watcher_thread = Thread(
             target=self._watch_market_updates,
             name=f"{self.name}-market-watcher",
@@ -196,11 +212,16 @@ class PolymarketClobWebSocketConnector(BaseConnector):
         if self._market_watcher_thread and self._market_watcher_thread.is_alive():
             self._market_watcher_thread.join(timeout=2.0)
         
-        # Unsubscribe from market spec
+        # Unsubscribe from market spec and expired markets
         if self._market_subscription:
             from pubsub import unsubscribe
             unsubscribe(self._market_subscription)
             self._market_subscription = None
+        
+        if self._expired_subscription:
+            from pubsub import unsubscribe
+            unsubscribe(self._expired_subscription)
+            self._expired_subscription = None
         
         # Close WebSocket
         self._close_websocket()
@@ -213,15 +234,33 @@ class PolymarketClobWebSocketConnector(BaseConnector):
         Background thread that watches for market spec updates.
         
         When a new MarketSpec is published, adds it to subscriptions.
+        When a MarketSpec expires, removes it from subscriptions.
         """
         while not self._market_watcher_stop.is_set():
             try:
+                # Check for new markets
                 if self._market_subscription:
-                    market = self._market_subscription.get(timeout=1.0)
-                    if isinstance(market, MarketSpec):
-                        self.add_market(market)
-            except queue.Empty:
-                continue
+                    try:
+                        market = self._market_subscription.get(timeout=0.1)
+                        if isinstance(market, MarketSpec):
+                            self.add_market(market)
+                    except queue.Empty:
+                        pass
+                
+                # Check for expired markets
+                if self._expired_subscription:
+                    try:
+                        expired_market = self._expired_subscription.get(timeout=0.1)
+                        if isinstance(expired_market, MarketSpec):
+                            self.logger.info(
+                                f"Removing expired market: {expired_market.market_id[:16]}...",
+                                event_id=expired_market.event_id,
+                                market_id=expired_market.market_id
+                            )
+                            self.remove_market(expired_market.market_id)
+                    except queue.Empty:
+                        pass
+                        
             except Exception as e:
                 self.logger.error(f"Error in market watcher: {e}")
     
@@ -417,9 +456,10 @@ class PolymarketClobWebSocketConnector(BaseConnector):
         elif event_type == "tick_size":
             # Tick size update - informational
             self.logger.debug(f"Tick size update: {event}")
-        else:
+        elif event_type:
             # Log unknown event types for debugging
             self.logger.debug(f"Unknown event type: {event_type}", event=event)
+        # else: empty event type, likely a heartbeat or ack
     
     def _handle_price_event(self, event: Dict[str, Any]) -> None:
         """
@@ -467,28 +507,18 @@ class PolymarketClobWebSocketConnector(BaseConnector):
                     best_ask = float(asks[0].get("price", 0))
                     best_ask_qty = float(asks[0].get("size", 0))
                 
-                # Only log if bid/ask PRICE changed (not quantity)
-                # Use time-based throttling: log at most once per 60 seconds for unchanged prices
+                # Only log if bid/ask price changed (rounded to avoid float noise)
+                # Round to 4 decimal places for comparison
                 last_bbo = self._last_logged_bbo.get(asset_id)
                 current_bbo = (round(best_bid, 4) if best_bid is not None else None, 
                                round(best_ask, 4) if best_ask is not None else None)
                 
-                current_time = time.time()
-                last_log_time = self._last_logged_time.get(asset_id, 0)
-                time_since_last_log = current_time - last_log_time
+                # Debug: check why we're logging
+                if last_bbo != current_bbo:
+                    self.logger.debug(f"BBO changed: {last_bbo} -> {current_bbo} for {asset_id[:8]}")
                 
-                # Log if: price changed OR it's been 60+ seconds since last log
-                price_changed = last_bbo != current_bbo
-                should_log = (price_changed or time_since_last_log >= 60.0) and \
-                             (best_bid is not None or best_ask is not None)
-                
-                # DEBUG: Print to stderr to see what's happening
-                import sys
-                print(f"DEDUP: asset={asset_id[:8]} last={last_bbo} curr={current_bbo} changed={price_changed} time={time_since_last_log:.1f}s should_log={should_log}", file=sys.stderr)
-                
-                if should_log:
+                if last_bbo != current_bbo and (best_bid is not None or best_ask is not None):
                     self._last_logged_bbo[asset_id] = current_bbo
-                    self._last_logged_time[asset_id] = current_time
                     
                     bid_str = f"{best_bid:.4f}" if best_bid else "N/A"
                     ask_str = f"{best_ask:.4f}" if best_ask else "N/A"
@@ -557,9 +587,26 @@ class PolymarketClobWebSocketConnector(BaseConnector):
                         continue
                     
                     price = change.get("price")
+                    size = change.get("size")
+                    side = change.get("side")  # "BUY" or "SELL"
+                    
                     if price:
                         market_id = self._token_to_market.get(asset_id, "")
                         outcome_side = self._token_to_side.get(asset_id, "?")
+                        series_key = self._token_to_series.get(asset_id, "Unknown")
+                        
+                        # Log the price change
+                        side_str = "Bid" if side == "BUY" else "Ask" if side == "SELL" else "?"
+                        size_str = f"({float(size):.0f})" if size else ""
+                        self.logger.info(
+                            f"[{series_key}] {outcome_side}: {side_str}={float(price):.4f}{size_str}",
+                            series=series_key,
+                            side=outcome_side,
+                            price_side=side,
+                            price=float(price),
+                            size=float(size) if size else None,
+                            token_id=asset_id[:20] + "..."
+                        )
                         
                         tick = MarketPriceTick(
                             ts_ms=current_ts_ms(),
