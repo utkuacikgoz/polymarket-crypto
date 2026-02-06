@@ -21,6 +21,7 @@ TOPIC_BINANCE_TICKS = "binance_ticks"
 TOPIC_MARKET_SPEC = "market_spec"
 TOPIC_MARKET_EXPIRED = "market_expired"
 TOPIC_POLYMARKET_PRICES = "polymarket_prices"
+TOPIC_CHAINLINK_PRICES = "chainlink_prices"
 TOPIC_HEALTH = "health"
 
 

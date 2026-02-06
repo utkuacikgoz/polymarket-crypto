@@ -193,6 +193,55 @@ class PolymarketGammaConfig:
 
 
 @dataclass(frozen=True)
+class RTDSConfig:
+    """Configuration for Polymarket RTDS (Real-Time Data Service) connector.
+    
+    Provides access to Chainlink oracle price feeds via WebSocket.
+    Symbols are automatically derived from the target series in PolymarketGammaConfig.
+    Docs: https://docs.polymarket.com/developers/RTDS/RTDS-crypto-prices
+    """
+    
+    # WebSocket endpoint for RTDS
+    ws_base_url: str = "wss://ws-live-data.polymarket.com"
+    
+    # Connection settings
+    ping_interval_sec: float = 30.0
+    reconnect_delay_base_sec: float = 1.0
+    reconnect_delay_max_sec: float = 60.0
+    
+    # SSL verification
+    ssl_verify: bool = True
+    
+    @classmethod
+    def from_env(cls) -> "RTDSConfig":
+        """Create configuration from environment variables."""
+        return cls(
+            ws_base_url=_get_env("RTDS_WS_URL", "wss://ws-live-data.polymarket.com"),
+            ping_interval_sec=_get_env_float("RTDS_PING_INTERVAL_SEC", 30.0),
+            reconnect_delay_base_sec=_get_env_float("RTDS_RECONNECT_DELAY_BASE_SEC", 1.0),
+            reconnect_delay_max_sec=_get_env_float("RTDS_RECONNECT_DELAY_MAX_SEC", 60.0),
+            ssl_verify=_get_env_bool("SSL_VERIFY", True),
+        )
+    
+    @staticmethod
+    def get_chainlink_symbols_for_series(target_series: tuple) -> tuple:
+        """Get Chainlink symbol format for configured series.
+        
+        Maps series like ("BTC", "15M") to Chainlink format "btc/usd".
+        
+        Args:
+            target_series: Tuple of (coin, duration) pairs from PolymarketGammaConfig
+            
+        Returns:
+            Tuple of Chainlink symbol strings (e.g., ("btc/usd", "eth/usd"))
+        """
+        coins = set()
+        for coin, duration in target_series:
+            coins.add(coin.lower())
+        return tuple(f"{coin}/usd" for coin in sorted(coins))
+
+
+@dataclass(frozen=True)
 class PolymarketClobConfig:
     """Configuration for Polymarket CLOB WebSocket/REST connectors."""
     
@@ -283,6 +332,7 @@ class AppConfig:
     binance: BinanceConfig = field(default_factory=BinanceConfig.from_env)
     gamma: PolymarketGammaConfig = field(default_factory=PolymarketGammaConfig.from_env)
     clob: PolymarketClobConfig = field(default_factory=PolymarketClobConfig.from_env)
+    rtds: RTDSConfig = field(default_factory=RTDSConfig.from_env)
     logging: LoggingConfig = field(default_factory=LoggingConfig.from_env)
     
     # Status reporting interval
@@ -300,6 +350,7 @@ class AppConfig:
             binance=BinanceConfig.from_env(),
             gamma=PolymarketGammaConfig.from_env(),
             clob=PolymarketClobConfig.from_env(),
+            rtds=RTDSConfig.from_env(),
             logging=LoggingConfig.from_env(),
             status_interval_sec=_get_env_float("STATUS_INTERVAL_SEC", 10.0),
             health_check_interval_sec=_get_env_float("HEALTH_CHECK_INTERVAL_SEC", 5.0),

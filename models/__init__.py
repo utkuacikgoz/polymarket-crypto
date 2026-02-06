@@ -52,6 +52,13 @@ from models.health import (
     HealthEvent,
 )
 
+from models.rtds import (
+    RTDSSource,
+    ChainlinkPriceTick,
+    RTDSSubscription,
+    parse_rtds_message,
+)
+
 __all__ = [
     # Common
     "SourceType",
@@ -77,6 +84,11 @@ __all__ = [
     "MarketSpec",
     "MarketPriceTick",
     "MarketSnapshot",
+    # RTDS / Chainlink
+    "RTDSSource",
+    "ChainlinkPriceTick",
+    "RTDSSubscription",
+    "parse_rtds_message",
     # Health
     "ConnectorHealth",
     "HealthEvent",

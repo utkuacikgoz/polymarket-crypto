@@ -16,10 +16,11 @@ from typing import Dict, List, Optional, Any
 from config import AppConfig, get_config
 from models import (
     ConnectorHealth, HealthEvent, MarketSpec, PriceTick, 
-    MarketPriceTick, current_ts_ms
+    MarketPriceTick, ChainlinkPriceTick, current_ts_ms
 )
 from pubsub import (
-    TOPIC_BINANCE_TICKS, TOPIC_MARKET_SPEC, TOPIC_POLYMARKET_PRICES, TOPIC_HEALTH,
+    TOPIC_BINANCE_TICKS, TOPIC_MARKET_SPEC, TOPIC_POLYMARKET_PRICES, 
+    TOPIC_CHAINLINK_PRICES, TOPIC_HEALTH,
     get_event_bus, subscribe, Subscription
 )
 from logging_utils import setup_logging, get_logger
@@ -28,6 +29,7 @@ from connectors.binance_ws import BinanceWebSocketConnector
 from connectors.polymarket_gamma import PolymarketGammaConnector
 from connectors.polymarket_clob_ws import PolymarketClobWebSocketConnector
 from connectors.polymarket_clob_rest import PolymarketClobRestConnector
+from connectors.rtds_chainlink import RTDSChainlinkConnector
 from connectors.base import BaseConnector
 
 
@@ -60,6 +62,7 @@ class ConnectorOrchestrator:
         self._gamma: Optional[PolymarketGammaConnector] = None
         self._clob_ws: Optional[PolymarketClobWebSocketConnector] = None
         self._clob_rest: Optional[PolymarketClobRestConnector] = None
+        self._rtds_chainlink: Optional[RTDSChainlinkConnector] = None
         
         # State
         self._running = False
@@ -75,10 +78,12 @@ class ConnectorOrchestrator:
         self._binance_subscription: Optional[Subscription] = None
         self._polymarket_subscription: Optional[Subscription] = None
         self._market_subscription: Optional[Subscription] = None
+        self._chainlink_subscription: Optional[Subscription] = None
         
         # Latest data for status display (multi-symbol/multi-market)
         self._last_binance_ticks: Dict[str, PriceTick] = {}  # By symbol
         self._last_polymarket_ticks: Dict[str, MarketPriceTick] = {}  # By token
+        self._last_chainlink_ticks: Dict[str, ChainlinkPriceTick] = {}  # By symbol
         self._current_markets: Dict[str, MarketSpec] = {}  # By market_id
         
         # Background threads
@@ -107,12 +112,14 @@ class ConnectorOrchestrator:
         self._gamma = PolymarketGammaConnector(self.config.gamma)
         self._clob_ws = PolymarketClobWebSocketConnector(self.config.clob)
         self._clob_rest = PolymarketClobRestConnector(self.config.clob)
+        self._rtds_chainlink = RTDSChainlinkConnector(self.config.rtds, self.config.gamma)
         
         # Subscribe to event topics for monitoring
         self._health_subscription = subscribe(TOPIC_HEALTH, "orchestrator_health")
         self._binance_subscription = subscribe(TOPIC_BINANCE_TICKS, "orchestrator_binance")
         self._polymarket_subscription = subscribe(TOPIC_POLYMARKET_PRICES, "orchestrator_pm_prices")
         self._market_subscription = subscribe(TOPIC_MARKET_SPEC, "orchestrator_market")
+        self._chainlink_subscription = subscribe(TOPIC_CHAINLINK_PRICES, "orchestrator_chainlink")
         
         # Start connectors
         logger.info("Starting Binance WebSocket connector")
@@ -123,6 +130,9 @@ class ConnectorOrchestrator:
         
         logger.info("Starting Polymarket CLOB WebSocket connector")
         self._clob_ws.start()
+        
+        logger.info("Starting RTDS Chainlink connector")
+        self._rtds_chainlink.start()
         
         # REST connector is started on-demand when WS is unhealthy
         # self._clob_rest.start()
@@ -154,6 +164,7 @@ class ConnectorOrchestrator:
         connectors = [
             self._clob_rest,
             self._clob_ws,
+            self._rtds_chainlink,
             self._gamma,
             self._binance_ws
         ]
@@ -171,7 +182,8 @@ class ConnectorOrchestrator:
             self._health_subscription, 
             self._binance_subscription, 
             self._polymarket_subscription, 
-            self._market_subscription
+            self._market_subscription,
+            self._chainlink_subscription
         ]:
             if sub:
                 unsubscribe(sub)
@@ -243,6 +255,7 @@ class ConnectorOrchestrator:
                     for tick in ticks:
                         if isinstance(tick, PriceTick):
                             self._last_binance_ticks[tick.symbol.upper()] = tick
+                            #logger.info(f"[Binance] {tick}")
                 
                 # Collect polymarket ticks
                 if self._polymarket_subscription:
@@ -250,6 +263,7 @@ class ConnectorOrchestrator:
                     for tick in ticks:
                         if isinstance(tick, MarketPriceTick):
                             self._last_polymarket_ticks[tick.token_id] = tick
+                            #logger.info(f"[Polymarket] {tick}")
                 
                 # Collect market updates (multi-market)
                 if self._market_subscription:
@@ -257,9 +271,18 @@ class ConnectorOrchestrator:
                     for market in markets:
                         if isinstance(market, MarketSpec):
                             self._current_markets[market.market_id] = market
+                            #logger.info(f"[Market] {market}")
                             # Update REST connector with new market if in fallback mode
                             if self._clob_rest and self._rest_fallback_active:
                                 self._clob_rest.add_market(market)
+                
+                # Collect Chainlink price ticks
+                if self._chainlink_subscription:
+                    ticks = self._chainlink_subscription.get_all()
+                    for tick in ticks:
+                        if isinstance(tick, ChainlinkPriceTick):
+                            self._last_chainlink_ticks[tick.symbol.lower()] = tick
+                            logger.info(f"[Chainlink] {tick}")
                 
             except Exception as e:
                 logger.debug(f"Error collecting data: {e}")
@@ -318,43 +341,64 @@ class ConnectorOrchestrator:
             self._clob_rest.stop()
     
     def _print_status(self) -> None:
-        """Print a status line to console."""
+        """Print a status line to console showing unified per-asset pricing."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         
-        # Market info (show count and series)
-        market_count = len(self._current_markets)
-        if market_count > 0:
-            # Show series keys from extra data
-            series_keys = set()
-            for market in self._current_markets.values():
-                if market.extra and "series_key" in market.extra:
-                    series_keys.add(market.extra["series_key"])
-            series_str = ",".join(sorted(series_keys)) if series_keys else "Unknown"
+        # Build unified per-asset status
+        # Group by series_key (e.g., "BTC-15M", "ETH-15M")
+        asset_lines = []
+        
+        for series_key in sorted(set(
+            m.extra.get("series_key", "Unknown") 
+            for m in self._current_markets.values() 
+            if m.extra
+        )):
+            # Find markets for this series
+            series_markets = [
+                m for m in self._current_markets.values()
+                if m.extra and m.extra.get("series_key") == series_key
+            ]
             
-            first_market = next(iter(self._current_markets.values()))
-            expiry_dt = datetime.fromtimestamp(first_market.expiry_ts_ms / 1000, tz=timezone.utc)
+            if not series_markets:
+                continue
+            
+            market = series_markets[0]  # Take first market for this series
+            coin = series_key.split("-")[0] if "-" in series_key else series_key
+            
+            # Get Binance price for this coin
+            binance_symbol = f"{coin}USDT"
+            binance_tick = self._last_binance_ticks.get(binance_symbol)
+            if binance_tick:
+                bin_age = current_ts_ms() - binance_tick.ts_ms
+                bin_str = f"Bin:${binance_tick.mid:,.2f}[{binance_tick.bid:.2f}/{binance_tick.ask:.2f}]({bin_age}ms)"
+            else:
+                bin_str = "Bin:N/A"
+            
+            # Get Chainlink price for this coin
+            chainlink_symbol = f"{coin.lower()}/usd"
+            chainlink_tick = self._last_chainlink_ticks.get(chainlink_symbol)
+            if chainlink_tick:
+                cl_age = current_ts_ms() - chainlink_tick.ts_ms
+                cl_str = f"CL:${chainlink_tick.price:,.2f}({cl_age}ms)"
+            else:
+                cl_str = "CL:N/A"
+            
+            # Get Polymarket prices for UP/DOWN tokens
+            pm_parts = []
+            for token_id in market.get_token_ids():
+                pm_tick = self._last_polymarket_ticks.get(token_id)
+                if pm_tick:
+                    side = "UP" if token_id == market.token_yes else "DOWN"
+                    pm_age = current_ts_ms() - pm_tick.ts_ms
+                    # Format: side:price (age)
+                    pm_parts.append(f"{side}:{pm_tick.price:.3f}({pm_age}ms)")
+            pm_str = " ".join(pm_parts) if pm_parts else "PM:N/A"
+            
+            # Get expiry time
+            expiry_dt = datetime.fromtimestamp(market.expiry_ts_ms / 1000, tz=timezone.utc)
             expiry = expiry_dt.strftime("%H:%M:%S")
-            market_info = f"{market_count} ({series_str})"
-        else:
-            market_info = "None"
-            expiry = "N/A"
-        
-        # Binance prices (multi-symbol)
-        binance_info = []
-        for symbol, tick in sorted(self._last_binance_ticks.items()):
-            age_ms = current_ts_ms() - tick.ts_ms
-            symbol_short = symbol.replace("USDT", "")
-            binance_info.append(f"{symbol_short}:${tick.mid:,.0f}({age_ms}ms)")
-        binance_str = " | ".join(binance_info) if binance_info else "N/A"
-        
-        # Polymarket prices (show count)
-        pm_count = len(self._last_polymarket_ticks)
-        if self._last_polymarket_ticks:
-            latest = max(self._last_polymarket_ticks.values(), key=lambda t: t.ts_ms)
-            age_ms = current_ts_ms() - latest.ts_ms
-            pm_str = f"{pm_count} tokens ({age_ms}ms ago)"
-        else:
-            pm_str = "N/A"
+            
+            asset_lines.append(f"[{series_key} exp:{expiry}] {bin_str} | {cl_str} | {pm_str}")
         
         # Health summary
         health = self._get_health_summary()
@@ -362,15 +406,16 @@ class ConnectorOrchestrator:
         # Fallback status
         fallback = " [REST FALLBACK]" if self._rest_fallback_active else ""
         
-        status_line = (
-            f"[{now}] "
-            f"Markets: {market_info} | "
-            f"Binance: {binance_str} | "
-            f"PM: {pm_str} | "
-            f"Health: {health}{fallback}"
-        )
+        # Print header line
+        header = f"[{now}] Health: {health}{fallback}"
+        print(header)
         
-        print(status_line)
+        # Print each asset on its own line for readability
+        if asset_lines:
+            for line in asset_lines:
+                print(f"  {line}")
+        else:
+            print("  No active markets")
     
     def _get_health_summary(self) -> str:
         """Get a short health summary string."""
@@ -380,6 +425,7 @@ class ConnectorOrchestrator:
             ("BIN", self._binance_ws),
             ("GAM", self._gamma),
             ("WS", self._clob_ws),
+            ("RTDS", self._rtds_chainlink),
             ("REST", self._clob_rest if self._rest_fallback_active else None),
         ]
         
@@ -398,6 +444,7 @@ class ConnectorOrchestrator:
             self._binance_ws,
             self._gamma,
             self._clob_ws,
+            self._rtds_chainlink,
             self._clob_rest
         ]
         
