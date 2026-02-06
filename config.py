@@ -72,6 +72,9 @@ class BinanceConfig:
     reconnect_delay_base_sec: float = 1.0
     reconnect_delay_max_sec: float = 60.0
     
+    # SSL verification (set to False if behind corporate proxy)
+    ssl_verify: bool = True
+    
     @classmethod
     def from_env(cls) -> "BinanceConfig":
         """Create configuration from environment variables."""
@@ -85,6 +88,7 @@ class BinanceConfig:
             ping_timeout_sec=_get_env_float("BINANCE_PING_TIMEOUT_SEC", 10.0),
             reconnect_delay_base_sec=_get_env_float("BINANCE_RECONNECT_DELAY_BASE_SEC", 1.0),
             reconnect_delay_max_sec=_get_env_float("BINANCE_RECONNECT_DELAY_MAX_SEC", 60.0),
+            ssl_verify=_get_env_bool("SSL_VERIFY", True),
         )
 
     @property
@@ -128,6 +132,9 @@ class PolymarketGammaConfig:
     reconnect_delay_base_sec: float = 1.0
     reconnect_delay_max_sec: float = 300.0
     
+    # SSL verification (set to False if behind corporate proxy)
+    ssl_verify: bool = True
+    
     @classmethod
     def from_env(cls) -> "PolymarketGammaConfig":
         """Create configuration from environment variables.
@@ -159,6 +166,7 @@ class PolymarketGammaConfig:
             request_timeout_sec=_get_env_float("POLYMARKET_REQUEST_TIMEOUT_SEC", 10.0),
             reconnect_delay_base_sec=_get_env_float("POLYMARKET_RECONNECT_DELAY_BASE_SEC", 1.0),
             reconnect_delay_max_sec=_get_env_float("POLYMARKET_RECONNECT_DELAY_MAX_SEC", 300.0),
+            ssl_verify=_get_env_bool("SSL_VERIFY", True),
         )
     
     def get_series_ids(self) -> Dict[str, int]:
@@ -211,6 +219,9 @@ class PolymarketClobConfig:
     # Health check settings
     ws_unhealthy_threshold_sec: float = 30.0
     
+    # SSL verification (set to False if behind corporate proxy)
+    ssl_verify: bool = True
+    
     @classmethod
     def from_env(cls) -> "PolymarketClobConfig":
         """Create configuration from environment variables."""
@@ -226,6 +237,7 @@ class PolymarketClobConfig:
             rest_poll_interval_sec=_get_env_float("POLYMARKET_REST_POLL_INTERVAL_SEC", 5.0),
             request_timeout_sec=_get_env_float("POLYMARKET_REQUEST_TIMEOUT_SEC", 10.0),
             ws_unhealthy_threshold_sec=_get_env_float("POLYMARKET_WS_UNHEALTHY_THRESHOLD_SEC", 30.0),
+            ssl_verify=_get_env_bool("SSL_VERIFY", True),
         )
 
 

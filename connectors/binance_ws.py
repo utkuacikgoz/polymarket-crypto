@@ -5,6 +5,7 @@ Streams best bid/ask prices for multiple symbols and publishes mid-price ticks.
 """
 
 import json
+import ssl
 import time
 from typing import Dict, Optional
 
@@ -72,11 +73,21 @@ class BinanceWebSocketConnector(BaseConnector):
         url = self.config.stream_url
         self.logger.info(f"Connecting to {url}", symbols=list(self.config.symbols))
         
+        # Create SSL context based on config
+        sslopt = None
+        if not self.config.ssl_verify:
+            sslopt = {
+                "cert_reqs": ssl.CERT_NONE,
+                "check_hostname": False,
+            }
+            self.logger.warning("SSL verification disabled")
+        
         # Create WebSocket connection with ping/pong handling
         self._ws = websocket.create_connection(
             url,
             timeout=self.config.ping_timeout_sec,
-            enable_multithread=True
+            enable_multithread=True,
+            sslopt=sslopt,
         )
         
         try:
@@ -235,10 +246,20 @@ class BinanceSubscriptionConnector(BaseConnector):
         url = f"{self.config.ws_base_url}/ws"
         self.logger.info(f"Connecting to {url}", symbols=list(self.config.symbols))
         
+        # Create SSL context based on config
+        sslopt = None
+        if not self.config.ssl_verify:
+            sslopt = {
+                "cert_reqs": ssl.CERT_NONE,
+                "check_hostname": False,
+            }
+            self.logger.warning("SSL verification disabled")
+        
         self._ws = websocket.create_connection(
             url,
             timeout=self.config.ping_timeout_sec,
-            enable_multithread=True
+            enable_multithread=True,
+            sslopt=sslopt,
         )
         
         try:
