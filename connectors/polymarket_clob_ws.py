@@ -76,6 +76,7 @@ class PolymarketClobWebSocketConnector(BaseConnector):
         
         # Last logged bid/ask to avoid duplicate logs
         self._last_logged_bbo: Dict[str, tuple] = {}  # token_id -> (bid, ask)
+        self._last_logged_time: Dict[str, float] = {}  # token_id -> timestamp (for throttling)
     
     @property
     def current_market(self) -> Optional[MarketSpec]:
@@ -466,18 +467,28 @@ class PolymarketClobWebSocketConnector(BaseConnector):
                     best_ask = float(asks[0].get("price", 0))
                     best_ask_qty = float(asks[0].get("size", 0))
                 
-                # Only log if bid/ask price changed (rounded to avoid float noise)
-                # Round to 4 decimal places for comparison
+                # Only log if bid/ask PRICE changed (not quantity)
+                # Use time-based throttling: log at most once per 60 seconds for unchanged prices
                 last_bbo = self._last_logged_bbo.get(asset_id)
                 current_bbo = (round(best_bid, 4) if best_bid is not None else None, 
                                round(best_ask, 4) if best_ask is not None else None)
                 
-                # Debug: check why we're logging
-                if last_bbo != current_bbo:
-                    self.logger.debug(f"BBO changed: {last_bbo} -> {current_bbo} for {asset_id[:8]}")
+                current_time = time.time()
+                last_log_time = self._last_logged_time.get(asset_id, 0)
+                time_since_last_log = current_time - last_log_time
                 
-                if last_bbo != current_bbo and (best_bid is not None or best_ask is not None):
+                # Log if: price changed OR it's been 60+ seconds since last log
+                price_changed = last_bbo != current_bbo
+                should_log = (price_changed or time_since_last_log >= 60.0) and \
+                             (best_bid is not None or best_ask is not None)
+                
+                # DEBUG: Print to stderr to see what's happening
+                import sys
+                print(f"DEDUP: asset={asset_id[:8]} last={last_bbo} curr={current_bbo} changed={price_changed} time={time_since_last_log:.1f}s should_log={should_log}", file=sys.stderr)
+                
+                if should_log:
                     self._last_logged_bbo[asset_id] = current_bbo
+                    self._last_logged_time[asset_id] = current_time
                     
                     bid_str = f"{best_bid:.4f}" if best_bid else "N/A"
                     ask_str = f"{best_ask:.4f}" if best_ask else "N/A"
