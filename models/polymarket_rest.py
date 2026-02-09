@@ -1,88 +1,22 @@
 """
-Data models for the market data connectors.
+Polymarket REST API data models.
 
-All models are immutable dataclasses with serialization helpers for JSONL logging.
+Models for Polymarket Gamma API and CLOB REST API responses.
 """
 
-from dataclasses import dataclass, field, asdict
-from typing import Optional, Dict, Any
-from enum import Enum
-import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
+import json
 
-
-class SourceType(Enum):
-    """Source identifier for price data."""
-    BINANCE = "binance"
-    POLYMARKET_WS = "polymarket_ws"
-    POLYMARKET_REST = "polymarket_rest"
-    GAMMA = "gamma"
-
-
-class MarketStatus(Enum):
-    """Status of a Polymarket market."""
-    ACTIVE = "active"
-    CLOSED = "closed"
-    RESOLVED = "resolved"
-    UNKNOWN = "unknown"
-
-
-class Side(Enum):
-    """Order side."""
-    BUY = "buy"
-    SELL = "sell"
-
-
-@dataclass(frozen=True)
-class PriceTick:
-    """
-    A single price tick from a spot exchange (e.g., Binance).
-    
-    Attributes:
-        ts_ms: Timestamp in milliseconds (epoch)
-        symbol: Trading pair symbol (e.g., "BTCUSDT")
-        bid: Best bid price
-        ask: Best ask price
-        mid: Mid-price computed as (bid + ask) / 2
-        source: Source of the tick data
-    """
-    ts_ms: int
-    symbol: str
-    bid: float
-    ask: float
-    mid: float
-    source: SourceType
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Serialize to dictionary for JSONL logging."""
-        return {
-            "type": "price_tick",
-            "ts_ms": self.ts_ms,
-            "symbol": self.symbol,
-            "bid": self.bid,
-            "ask": self.ask,
-            "mid": self.mid,
-            "source": self.source.value
-        }
-
-    @classmethod
-    def from_binance_book_ticker(cls, data: Dict[str, Any]) -> "PriceTick":
-        """Create PriceTick from Binance bookTicker message."""
-        bid = float(data["b"])
-        ask = float(data["a"])
-        return cls(
-            ts_ms=int(time.time() * 1000),
-            symbol=data["s"],
-            bid=bid,
-            ask=ask,
-            mid=(bid + ask) / 2,
-            source=SourceType.BINANCE
-        )
+from models.common import SourceType, MarketStatus, Side
 
 
 @dataclass(frozen=True)
 class MarketSpec:
     """
     Specification of a Polymarket market.
+    
+    Typically populated from Gamma API responses.
     
     Attributes:
         market_id: Unique market identifier (condition ID in Polymarket)
@@ -156,8 +90,6 @@ class MarketSpec:
         Returns None if required fields are missing.
         """
         try:
-            import json
-            
             # Parse token IDs from clobTokenIds field
             # Can be JSON array string like '["token1", "token2"]' or comma-separated
             clob_token_ids = data.get("clobTokenIds", "")
@@ -209,7 +141,6 @@ class MarketSpec:
             # Parse outcomes
             outcomes_str = data.get("outcomes", '["Yes", "No"]')
             try:
-                import json
                 outcomes = tuple(json.loads(outcomes_str))
             except (json.JSONDecodeError, TypeError):
                 outcomes = ("Yes", "No")
@@ -236,7 +167,7 @@ class MarketSpec:
                 accepts_orders=accepts_orders,
                 outcomes=outcomes
             )
-        except (KeyError, ValueError, IndexError) as e:
+        except (KeyError, ValueError, IndexError):
             return None
 
 
@@ -244,6 +175,8 @@ class MarketSpec:
 class MarketPriceTick:
     """
     A single price tick from Polymarket for a specific token.
+    
+    Used for both WebSocket and REST price updates.
     
     Attributes:
         ts_ms: Timestamp in milliseconds (epoch)
@@ -271,12 +204,24 @@ class MarketPriceTick:
             "side": self.side.value if self.side else None,
             "source": self.source.value
         }
+    
+    @property
+    def is_yes_token(self) -> bool:
+        """Check if this is likely a YES token (price > 0.5 typically)."""
+        return self.price > 0.5
+    
+    @property
+    def implied_probability(self) -> float:
+        """Get implied probability (same as price for Polymarket)."""
+        return self.price
 
 
 @dataclass(frozen=True)
 class MarketSnapshot:
     """
     A complete snapshot of a Polymarket market's current state.
+    
+    Combines data from both YES and NO tokens for a market.
     
     Attributes:
         ts_ms: Timestamp in milliseconds (epoch)
@@ -313,74 +258,159 @@ class MarketSnapshot:
             "best_no_ask": self.best_no_ask,
             "source": self.source.value
         }
+    
+    @property
+    def yes_mid(self) -> Optional[float]:
+        """Calculate YES token mid-price."""
+        if self.best_yes_bid is not None and self.best_yes_ask is not None:
+            return (self.best_yes_bid + self.best_yes_ask) / 2
+        return self.best_yes_price
+    
+    @property
+    def no_mid(self) -> Optional[float]:
+        """Calculate NO token mid-price."""
+        if self.best_no_bid is not None and self.best_no_ask is not None:
+            return (self.best_no_bid + self.best_no_ask) / 2
+        return self.best_no_price
+    
+    @property
+    def yes_spread(self) -> Optional[float]:
+        """Calculate YES token bid-ask spread."""
+        if self.best_yes_bid is not None and self.best_yes_ask is not None:
+            return self.best_yes_ask - self.best_yes_bid
+        return None
+    
+    @property
+    def no_spread(self) -> Optional[float]:
+        """Calculate NO token bid-ask spread."""
+        if self.best_no_bid is not None and self.best_no_ask is not None:
+            return self.best_no_ask - self.best_no_bid
+        return None
 
 
 @dataclass(frozen=True)
-class ConnectorHealth:
+class OrderBookLevel:
     """
-    Health status of a connector.
+    A single level in the order book from REST API.
     
     Attributes:
-        name: Connector name/identifier
-        healthy: Whether the connector is healthy
-        last_heartbeat_ts_ms: Timestamp of last successful heartbeat
-        last_error: Last error message (if any)
-        reconnect_count: Number of reconnection attempts
-        connected: Whether currently connected
-        last_message_ts_ms: Timestamp of last message received
+        price: Price at this level
+        size: Size available
     """
-    name: str
-    healthy: bool
-    last_heartbeat_ts_ms: int
-    last_error: Optional[str]
-    reconnect_count: int
-    connected: bool = False
-    last_message_ts_ms: Optional[int] = None
-
+    price: float
+    size: float
+    
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize to dictionary for JSONL logging."""
-        return {
-            "type": "connector_health",
-            "name": self.name,
-            "healthy": self.healthy,
-            "last_heartbeat_ts_ms": self.last_heartbeat_ts_ms,
-            "last_error": self.last_error,
-            "reconnect_count": self.reconnect_count,
-            "connected": self.connected,
-            "last_message_ts_ms": self.last_message_ts_ms
-        }
+        """Serialize to dictionary."""
+        return {"price": self.price, "size": self.size}
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "OrderBookLevel":
+        """Parse from API response."""
+        return cls(
+            price=float(data.get("price", 0)),
+            size=float(data.get("size", 0))
+        )
 
 
 @dataclass(frozen=True)
-class HealthEvent:
+class OrderBook:
     """
-    Health event emitted by connectors for monitoring.
+    Full order book from CLOB REST API.
     
     Attributes:
-        ts_ms: Event timestamp
-        connector_name: Name of the connector
-        event_type: Type of health event
-        message: Human-readable message
-        details: Additional details
+        token_id: Token ID this book is for
+        market_id: Market condition ID
+        bids: List of bid levels (sorted by price descending)
+        asks: List of ask levels (sorted by price ascending)
+        ts_ms: Timestamp when fetched
     """
+    token_id: str
+    market_id: str
+    bids: tuple  # Tuple[OrderBookLevel, ...]
+    asks: tuple  # Tuple[OrderBookLevel, ...]
     ts_ms: int
-    connector_name: str
-    event_type: str  # "connected", "disconnected", "error", "heartbeat", "reconnecting"
-    message: str
-    details: Optional[Dict[str, Any]] = None
-
+    
+    @property
+    def best_bid(self) -> Optional[OrderBookLevel]:
+        """Get best bid level."""
+        return self.bids[0] if self.bids else None
+    
+    @property
+    def best_ask(self) -> Optional[OrderBookLevel]:
+        """Get best ask level."""
+        return self.asks[0] if self.asks else None
+    
+    @property
+    def best_bid_price(self) -> Optional[float]:
+        """Get best bid price."""
+        return self.best_bid.price if self.best_bid else None
+    
+    @property
+    def best_ask_price(self) -> Optional[float]:
+        """Get best ask price."""
+        return self.best_ask.price if self.best_ask else None
+    
+    @property
+    def mid_price(self) -> Optional[float]:
+        """Calculate mid-price."""
+        bid = self.best_bid_price
+        ask = self.best_ask_price
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2
+        return bid or ask
+    
+    @property
+    def spread(self) -> Optional[float]:
+        """Calculate bid-ask spread."""
+        bid = self.best_bid_price
+        ask = self.best_ask_price
+        if bid is not None and ask is not None:
+            return ask - bid
+        return None
+    
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary for JSONL logging."""
         return {
-            "type": "health_event",
+            "type": "order_book",
+            "token_id": self.token_id,
+            "market_id": self.market_id,
+            "best_bid": self.best_bid_price,
+            "best_ask": self.best_ask_price,
+            "mid_price": self.mid_price,
+            "spread": self.spread,
+            "bid_depth": len(self.bids),
+            "ask_depth": len(self.asks),
             "ts_ms": self.ts_ms,
-            "connector_name": self.connector_name,
-            "event_type": self.event_type,
-            "message": self.message,
-            "details": self.details
         }
-
-
-def current_ts_ms() -> int:
-    """Get current timestamp in milliseconds."""
-    return int(time.time() * 1000)
+    
+    @classmethod
+    def from_rest_response(
+        cls,
+        data: Dict[str, Any],
+        token_id: str,
+        market_id: str,
+        ts_ms: int
+    ) -> "OrderBook":
+        """
+        Parse from CLOB REST API /book response.
+        
+        Expected format:
+        {
+            "bids": [{"price": "0.48", "size": "30"}, ...],
+            "asks": [{"price": "0.52", "size": "25"}, ...]
+        }
+        """
+        bids_raw = data.get("bids", [])
+        asks_raw = data.get("asks", [])
+        
+        bids = tuple(OrderBookLevel.from_dict(b) for b in bids_raw)
+        asks = tuple(OrderBookLevel.from_dict(a) for a in asks_raw)
+        
+        return cls(
+            token_id=token_id,
+            market_id=market_id,
+            bids=bids,
+            asks=asks,
+            ts_ms=ts_ms,
+        )

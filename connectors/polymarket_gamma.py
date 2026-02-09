@@ -91,6 +91,14 @@ class PolymarketGammaConnector(BaseConnector):
             "User-Agent": "PolymarketDataConnector/1.0"
         })
         
+        # Disable SSL verification if configured
+        if not self.config.ssl_verify:
+            self._session.verify = False
+            self.logger.warning("SSL verification disabled for REST requests")
+            # Suppress InsecureRequestWarning
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
         try:
             self._set_connected(True)
             self.logger.connected(self.config.api_base_url)

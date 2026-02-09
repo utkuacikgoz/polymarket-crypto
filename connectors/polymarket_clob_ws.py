@@ -7,14 +7,27 @@ dynamic re-subscription when markets change.
 
 import json
 import queue
+import ssl
 import time
 from threading import Event, Lock, Thread
-from typing import Dict, List, Optional, Set, Any
+from typing import Dict, List, Optional, Set, Any, Union
 
 import websocket
 
 from config import PolymarketClobConfig, get_config
 from models import MarketPriceTick, MarketSpec, SourceType, current_ts_ms
+from models.polymarket_ws import (
+    BookMessage,
+    PriceChangeMessage,
+    LastTradePriceMessage,
+    BestBidAskMessage,
+    TickSizeChangeMessage,
+    NewMarketMessage,
+    MarketResolvedMessage,
+    parse_ws_message,
+    parse_ws_messages,
+    PolymarketWSMessage,
+)
 from pubsub import TOPIC_POLYMARKET_PRICES, TOPIC_MARKET_SPEC, TOPIC_MARKET_EXPIRED, publish, subscribe, Subscription
 from connectors.base import BaseConnector
 
@@ -284,10 +297,20 @@ class PolymarketClobWebSocketConnector(BaseConnector):
         url = f"{self.config.ws_base_url}/ws/{self.CHANNEL_MARKET}"
         self.logger.info(f"Connecting to {url}")
         
+        # Create SSL context based on config
+        sslopt = None
+        if not self.config.ssl_verify:
+            sslopt = {
+                "cert_reqs": ssl.CERT_NONE,
+                "check_hostname": False,
+            }
+            self.logger.warning("SSL verification disabled")
+        
         self._ws = websocket.create_connection(
             url,
             timeout=30.0,
-            enable_multithread=True
+            enable_multithread=True,
+            sslopt=sslopt,
         )
         
         try:
@@ -417,210 +440,300 @@ class PolymarketClobWebSocketConnector(BaseConnector):
         Process a WebSocket message.
         
         Messages can be price updates, order book changes, etc.
+        Uses typed message models for safe parsing.
         
         Args:
             message: Raw JSON message
         """
-        try:
-            data = json.loads(message)
-            
-            self._update_last_message()
-            
-            # Handle different message types from Polymarket
-            # The market channel sends various event types
-            
-            if isinstance(data, list):
-                # Batch of events
-                for event in data:
-                    self._process_event(event)
-            elif isinstance(data, dict):
-                self._process_event(data)
-                
-        except json.JSONDecodeError as e:
-            self.logger.debug(f"Invalid JSON: {message[:100]}")
-        except Exception as e:
-            self.logger.warning(f"Error processing message: {e}")
+        self._update_last_message()
+        
+        # Parse using typed models
+        parsed_messages = parse_ws_messages(message)
+        
+        for msg in parsed_messages:
+            self._handle_typed_message(msg)
+        
+        # Fallback for unknown message types - parse raw JSON
+        if not parsed_messages:
+            try:
+                data = json.loads(message)
+                if isinstance(data, list):
+                    for event in data:
+                        self._process_raw_event(event)
+                elif isinstance(data, dict):
+                    self._process_raw_event(data)
+            except json.JSONDecodeError:
+                self.logger.debug(f"Invalid JSON: {message[:100]}")
+            except Exception as e:
+                self.logger.warning(f"Error processing message: {e}")
     
-    def _process_event(self, event: Dict[str, Any]) -> None:
+    def _handle_typed_message(self, msg: PolymarketWSMessage) -> None:
         """
-        Process a single event from the WebSocket.
+        Handle a typed WebSocket message.
+        
+        Args:
+            msg: Parsed typed message object
+        """
+        if isinstance(msg, BookMessage):
+            self._handle_book_message(msg)
+        elif isinstance(msg, PriceChangeMessage):
+            self._handle_price_change_message(msg)
+        elif isinstance(msg, LastTradePriceMessage):
+            self._handle_last_trade_message(msg)
+        elif isinstance(msg, BestBidAskMessage):
+            self._handle_best_bid_ask_message(msg)
+        elif isinstance(msg, TickSizeChangeMessage):
+            self._handle_tick_size_message(msg)
+        elif isinstance(msg, NewMarketMessage):
+            self._handle_new_market_message(msg)
+        elif isinstance(msg, MarketResolvedMessage):
+            self._handle_market_resolved_message(msg)
+    
+    def _process_raw_event(self, event: Dict[str, Any]) -> None:
+        """
+        Process a raw event that wasn't parsed into a typed model.
+        Fallback for unknown or malformed messages.
         
         Args:
             event: Event dictionary
         """
         event_type = event.get("event_type", event.get("type", ""))
         
-        # Handle price book events
-        if event_type in ("price_change", "book", "last_trade_price", "best_bid_ask"):
-            self._handle_price_event(event)
-        elif event_type == "tick_size":
-            # Tick size update - informational
-            self.logger.debug(f"Tick size update: {event}")
-        elif event_type:
+        if event_type:
             # Log unknown event types for debugging
-            self.logger.debug(f"Unknown event type: {event_type}", event=event)
+            self.logger.debug(f"Unhandled event type: {event_type}", event=event)
         # else: empty event type, likely a heartbeat or ack
     
-    def _handle_price_event(self, event: Dict[str, Any]) -> None:
+    def _handle_book_message(self, msg: BookMessage) -> None:
         """
-        Handle price-related events and log best bid/ask.
-        
-        Polymarket CLOB sends different event formats:
-        - 'book': Full order book with 'bids' and 'asks' arrays
-        - 'price_change': Incremental price updates with 'price_changes' array
-        - 'last_trade_price': Last trade with 'price', 'asset_id'
+        Handle a full order book snapshot message.
         
         Args:
-            event: Price event data
+            msg: Parsed BookMessage object
         """
-        event_type = event.get("event_type", "")
+        asset_id = msg.asset_id
+        if not asset_id:
+            return
         
-        try:
-            # Handle 'book' event - extract best bid/ask from order book arrays
-            if event_type == "book":
-                asset_id = event.get("asset_id", "")
-                if not asset_id:
-                    return
-                
-                # Get context for logging
-                series_key = self._token_to_series.get(asset_id, "Unknown")
-                outcome_side = self._token_to_side.get(asset_id, "?")
-                market_id = self._token_to_market.get(asset_id, "")
-                
-                bids = event.get("bids", [])
-                asks = event.get("asks", [])
-                
-                # Best bid is highest price in bids, best ask is lowest price in asks
-                # Format: [{"price": "0.85", "size": "1000"}, ...]
-                best_bid = None
-                best_bid_qty = None
-                best_ask = None
-                best_ask_qty = None
-                
-                if bids:
-                    # Bids should be sorted highest first
-                    best_bid = float(bids[0].get("price", 0))
-                    best_bid_qty = float(bids[0].get("size", 0))
-                
-                if asks:
-                    # Asks should be sorted lowest first
-                    best_ask = float(asks[0].get("price", 0))
-                    best_ask_qty = float(asks[0].get("size", 0))
-                
-                # Only log if bid/ask price changed (rounded to avoid float noise)
-                # Round to 4 decimal places for comparison
-                last_bbo = self._last_logged_bbo.get(asset_id)
-                current_bbo = (round(best_bid, 4) if best_bid is not None else None, 
-                               round(best_ask, 4) if best_ask is not None else None)
-                
-                # Debug: check why we're logging
-                if last_bbo != current_bbo:
-                    self.logger.debug(f"BBO changed: {last_bbo} -> {current_bbo} for {asset_id[:8]}")
-                
-                if last_bbo != current_bbo and (best_bid is not None or best_ask is not None):
-                    self._last_logged_bbo[asset_id] = current_bbo
-                    
-                    bid_str = f"{best_bid:.4f}" if best_bid else "N/A"
-                    ask_str = f"{best_ask:.4f}" if best_ask else "N/A"
-                    bid_qty_str = f"({best_bid_qty:.0f})" if best_bid_qty else ""
-                    ask_qty_str = f"({best_ask_qty:.0f})" if best_ask_qty else ""
-                    
-                    self.logger.info(
-                        f"[{series_key}] {outcome_side}: Bid={bid_str}{bid_qty_str} Ask={ask_str}{ask_qty_str}",
-                        series=series_key,
-                        side=outcome_side,
-                        best_bid=best_bid,
-                        best_ask=best_ask,
-                        bid_qty=best_bid_qty,
-                        ask_qty=best_ask_qty,
-                        token_id=asset_id[:20] + "..."
-                    )
-                
-                # Calculate mid price and publish tick
-                if best_bid and best_ask:
-                    mid_price = (best_bid + best_ask) / 2
-                    tick = MarketPriceTick(
-                        ts_ms=current_ts_ms(),
-                        market_id=market_id,
-                        token_id=asset_id,
-                        price=mid_price,
-                        side=outcome_side,
-                        source=SourceType.POLYMARKET_WS
-                    )
-                    self._last_prices[asset_id] = mid_price
-                    publish(TOPIC_POLYMARKET_PRICES, tick)
-                
-                # Also use last_trade_price if present
-                last_trade = event.get("last_trade_price")
-                if last_trade:
-                    price = float(last_trade)
-                    self._last_prices[asset_id] = price
+        # Get context for logging
+        series_key = self._token_to_series.get(asset_id, "Unknown")
+        outcome_side = self._token_to_side.get(asset_id, "?")
+        market_id = self._token_to_market.get(asset_id, msg.market)
+        
+        best_bid = msg.best_bid_price
+        best_ask = msg.best_ask_price
+        best_bid_qty = msg.best_bid.size_float if msg.best_bid else None
+        best_ask_qty = msg.best_ask.size_float if msg.best_ask else None
+        
+        # Only log if bid/ask price changed (rounded to avoid float noise)
+        last_bbo = self._last_logged_bbo.get(asset_id)
+        current_bbo = (round(best_bid, 4) if best_bid is not None else None, 
+                       round(best_ask, 4) if best_ask is not None else None)
+        
+        if last_bbo != current_bbo and (best_bid is not None or best_ask is not None):
+            self._last_logged_bbo[asset_id] = current_bbo
             
-            # Handle 'last_trade_price' event
-            elif event_type == "last_trade_price":
-                asset_id = event.get("asset_id", "")
-                if not asset_id:
-                    return
-                
-                price = event.get("price")
-                if price:
-                    market_id = self._token_to_market.get(asset_id, "")
-                    outcome_side = self._token_to_side.get(asset_id, "?")
-                    
-                    tick = MarketPriceTick(
-                        ts_ms=current_ts_ms(),
-                        market_id=market_id,
-                        token_id=asset_id,
-                        price=float(price),
-                        side=outcome_side,
-                        source=SourceType.POLYMARKET_WS
-                    )
-                    self._last_prices[asset_id] = float(price)
-                    publish(TOPIC_POLYMARKET_PRICES, tick)
+            bid_str = f"{best_bid:.4f}" if best_bid else "N/A"
+            ask_str = f"{best_ask:.4f}" if best_ask else "N/A"
+            bid_qty_str = f"({best_bid_qty:.0f})" if best_bid_qty else ""
+            ask_qty_str = f"({best_ask_qty:.0f})" if best_ask_qty else ""
             
-            # Handle 'price_change' event - may contain multiple asset updates
-            elif event_type == "price_change":
-                price_changes = event.get("price_changes", [])
-                for change in price_changes:
-                    asset_id = change.get("asset_id", "")
-                    if not asset_id:
-                        continue
-                    
-                    price = change.get("price")
-                    size = change.get("size")
-                    side = change.get("side")  # "BUY" or "SELL"
-                    
-                    if price:
-                        market_id = self._token_to_market.get(asset_id, "")
-                        outcome_side = self._token_to_side.get(asset_id, "?")
-                        series_key = self._token_to_series.get(asset_id, "Unknown")
-                        
-                        # Log the price change
-                        side_str = "Bid" if side == "BUY" else "Ask" if side == "SELL" else "?"
-                        size_str = f"({float(size):.0f})" if size else ""
-                        self.logger.info(
-                            f"[{series_key}] {outcome_side}: {side_str}={float(price):.4f}{size_str}",
-                            series=series_key,
-                            side=outcome_side,
-                            price_side=side,
-                            price=float(price),
-                            size=float(size) if size else None,
-                            token_id=asset_id[:20] + "..."
-                        )
-                        
-                        tick = MarketPriceTick(
-                            ts_ms=current_ts_ms(),
-                            market_id=market_id,
-                            token_id=asset_id,
-                            price=float(price),
-                            side=outcome_side,
-                            source=SourceType.POLYMARKET_WS
-                        )
-                        self._last_prices[asset_id] = float(price)
-                        publish(TOPIC_POLYMARKET_PRICES, tick)
-                
-        except (KeyError, ValueError, TypeError) as e:
-            self.logger.debug(f"Error parsing price event: {e}")
+            # self.logger.info(
+            #     f"[{series_key}] {outcome_side}: Bid={bid_str}{bid_qty_str} Ask={ask_str}{ask_qty_str}",
+            #     series=series_key,
+            #     side=outcome_side,
+            #     best_bid=best_bid,
+            #     best_ask=best_ask,
+            #     bid_qty=best_bid_qty,
+            #     ask_qty=best_ask_qty,
+            #     token_id=asset_id[:20] + "..."
+            # )
+        
+        # Calculate mid price and publish tick
+        mid_price = msg.mid_price
+        if mid_price is not None:
+            tick = MarketPriceTick(
+                ts_ms=msg.ts_ms,
+                market_id=market_id,
+                token_id=asset_id,
+                price=mid_price,
+                side=outcome_side,
+                source=SourceType.POLYMARKET_WS
+            )
+            self._last_prices[asset_id] = mid_price
+            publish(TOPIC_POLYMARKET_PRICES, tick)
+    
+    def _handle_price_change_message(self, msg: PriceChangeMessage) -> None:
+        """
+        Handle incremental price change message.
+        
+        Args:
+            msg: Parsed PriceChangeMessage object
+        """
+        for change in msg.price_changes:
+            asset_id = change.asset_id
+            if not asset_id:
+                continue
+            
+            market_id = self._token_to_market.get(asset_id, msg.market)
+            outcome_side = self._token_to_side.get(asset_id, "?")
+            series_key = self._token_to_series.get(asset_id, "Unknown")
+            
+            # Log the price change
+            # side_str = "Bid" if change.is_bid else "Ask" if change.is_ask else "?"
+            # size_str = f"({change.size_float:.0f})" if change.size else ""
+            # self.logger.info(
+            #     f"[{series_key}] {outcome_side}: {side_str}={change.price_float:.4f}{size_str}",
+            #     series=series_key,
+            #     side=outcome_side,
+            #     price_side=change.side,
+            #     price=change.price_float,
+            #     size=change.size_float if change.size else None,
+            #     token_id=asset_id[:20] + "..."
+            # )
+            
+            # Update BBO tracking
+            best_bid, best_ask = change.best_bid_float, change.best_ask_float
+            if best_bid is not None or best_ask is not None:
+                current_bbo = (round(best_bid, 4) if best_bid else None,
+                               round(best_ask, 4) if best_ask else None)
+                self._last_logged_bbo[asset_id] = current_bbo
+            
+            # Calculate mid price if we have both bid and ask
+            if best_bid is not None and best_ask is not None:
+                mid_price = (best_bid + best_ask) / 2
+            else:
+                mid_price = change.price_float
+            
+            tick = MarketPriceTick(
+                ts_ms=msg.ts_ms,
+                market_id=market_id,
+                token_id=asset_id,
+                price=mid_price,
+                side=outcome_side,
+                source=SourceType.POLYMARKET_WS
+            )
+            self._last_prices[asset_id] = mid_price
+            publish(TOPIC_POLYMARKET_PRICES, tick)
+    
+    def _handle_last_trade_message(self, msg: LastTradePriceMessage) -> None:
+        """
+        Handle last trade price message.
+        
+        Args:
+            msg: Parsed LastTradePriceMessage object
+        """
+        asset_id = msg.asset_id
+        if not asset_id:
+            return
+        
+        market_id = self._token_to_market.get(asset_id, msg.market)
+        outcome_side = self._token_to_side.get(asset_id, "?")
+        series_key = self._token_to_series.get(asset_id, "Unknown")
+        
+        # Trade logging moved to data_collector_loop in app.py
+        
+        tick = MarketPriceTick(
+            ts_ms=msg.ts_ms,
+            market_id=market_id,
+            token_id=asset_id,
+            price=msg.price_float,
+            side=outcome_side,
+            source=SourceType.POLYMARKET_WS
+        )
+        self._last_prices[asset_id] = msg.price_float
+        publish(TOPIC_POLYMARKET_PRICES, tick)
+    
+    def _handle_best_bid_ask_message(self, msg: BestBidAskMessage) -> None:
+        """
+        Handle best bid/ask update message.
+        
+        Args:
+            msg: Parsed BestBidAskMessage object
+        """
+        asset_id = msg.asset_id
+        if not asset_id:
+            return
+        
+        market_id = self._token_to_market.get(asset_id, msg.market)
+        outcome_side = self._token_to_side.get(asset_id, "?")
+        series_key = self._token_to_series.get(asset_id, "Unknown")
+        
+        # Update BBO tracking
+        current_bbo = (round(msg.best_bid_float, 4), round(msg.best_ask_float, 4))
+        last_bbo = self._last_logged_bbo.get(asset_id)
+        
+        if last_bbo != current_bbo:
+            self._last_logged_bbo[asset_id] = current_bbo
+            
+            # self.logger.info(
+            #     f"[{series_key}] {outcome_side}: BBO Bid={msg.best_bid_float:.4f} Ask={msg.best_ask_float:.4f} Spread={msg.spread_float:.4f}",
+            #     series=series_key,
+            #     side=outcome_side,
+            #     best_bid=msg.best_bid_float,
+            #     best_ask=msg.best_ask_float,
+            #     spread=msg.spread_float,
+            #     token_id=asset_id[:20] + "..."
+            # )
+        
+        mid_price = msg.mid_price
+        tick = MarketPriceTick(
+            ts_ms=msg.ts_ms,
+            market_id=market_id,
+            token_id=asset_id,
+            price=mid_price,
+            side=outcome_side,
+            source=SourceType.POLYMARKET_WS
+        )
+        self._last_prices[asset_id] = mid_price
+        publish(TOPIC_POLYMARKET_PRICES, tick)
+    
+    def _handle_tick_size_message(self, msg: TickSizeChangeMessage) -> None:
+        """
+        Handle tick size change message.
+        
+        Args:
+            msg: Parsed TickSizeChangeMessage object
+        """
+        asset_id = msg.asset_id
+        series_key = self._token_to_series.get(asset_id, "Unknown")
+        
+        self.logger.info(
+            f"[{series_key}] Tick size change: {msg.old_tick_size} -> {msg.new_tick_size}",
+            series=series_key,
+            asset_id=asset_id[:20] + "...",
+            old_tick_size=msg.old_tick_size,
+            new_tick_size=msg.new_tick_size,
+        )
+    
+    def _handle_new_market_message(self, msg: NewMarketMessage) -> None:
+        """
+        Handle new market creation message.
+        
+        Args:
+            msg: Parsed NewMarketMessage object
+        """
+        self.logger.info(
+            f"New market: {msg.question[:50]}...",
+            market_id=msg.market[:20] + "...",
+            slug=msg.slug,
+            outcomes=list(msg.outcomes),
+            assets=list(msg.assets_ids),
+        )
+    
+    def _handle_market_resolved_message(self, msg: MarketResolvedMessage) -> None:
+        """
+        Handle market resolution message.
+        
+        Args:
+            msg: Parsed MarketResolvedMessage object
+        """
+        self.logger.info(
+            f"Market resolved: {msg.question[:50]}... -> {msg.winning_outcome}",
+            market_id=msg.market[:20] + "...",
+            winning_outcome=msg.winning_outcome,
+            winning_asset_id=msg.winning_asset_id[:20] + "..." if msg.winning_asset_id else None,
+        )
     
     def _close_websocket(self) -> None:
         """Close the WebSocket connection."""
@@ -708,7 +821,21 @@ class PolymarketClobWebSocketConnectorSimple(BaseConnector):
         """Establish connection and process messages."""
         url = f"{self.config.ws_base_url}/ws/{self.CHANNEL_MARKET}"
         
-        self._ws = websocket.create_connection(url, timeout=30.0, enable_multithread=True)
+        # Create SSL context based on config
+        sslopt = None
+        if not self.config.ssl_verify:
+            sslopt = {
+                "cert_reqs": ssl.CERT_NONE,
+                "check_hostname": False,
+            }
+            self.logger.warning("SSL verification disabled")
+        
+        self._ws = websocket.create_connection(
+            url,
+            timeout=30.0,
+            enable_multithread=True,
+            sslopt=sslopt,
+        )
         
         try:
             self._set_connected(True)

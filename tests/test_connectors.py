@@ -27,6 +27,20 @@ from models import (
     ConnectorHealth, HealthEvent, SourceType, MarketStatus, Side,
     current_ts_ms
 )
+from models.polymarket_ws import (
+    OrderSummary,
+    BookMessage,
+    PriceChange,
+    PriceChangeMessage,
+    LastTradePriceMessage,
+    BestBidAskMessage,
+    TickSizeChangeMessage,
+    EventMessage,
+    NewMarketMessage,
+    MarketResolvedMessage,
+    parse_ws_message,
+    parse_ws_messages,
+)
 from pubsub import EventBus, Subscription, reset_event_bus, get_event_bus, publish, subscribe
 from connectors.base import BackoffCalculator
 from connectors.polymarket_gamma import MarketSpecDeduplicator
@@ -684,6 +698,463 @@ class TestMarketSpecParsing(unittest.TestCase):
         market = MarketSpec.from_gamma_response(gamma_response)
         
         self.assertIsNone(market)
+
+
+class TestPolymarketWSModels(unittest.TestCase):
+    """Tests for Polymarket WebSocket message models."""
+    
+    def test_order_summary_from_dict(self):
+        """Test OrderSummary parsing."""
+        data = {"price": "0.48", "size": "30"}
+        summary = OrderSummary.from_dict(data)
+        
+        self.assertEqual(summary.price, "0.48")
+        self.assertEqual(summary.size, "30")
+        self.assertAlmostEqual(summary.price_float, 0.48)
+        self.assertAlmostEqual(summary.size_float, 30.0)
+    
+    def test_book_message_parsing(self):
+        """Test BookMessage parsing from WebSocket data."""
+        data = {
+            "event_type": "book",
+            "asset_id": "65818619657568813474341868652308942079804919287380422192892211131408793125422",
+            "market": "0xbd31dc8a20211944f6b70f31557f1001557b59905b7738480ca09bd4532f84af",
+            "bids": [
+                {"price": ".48", "size": "30"},
+                {"price": ".47", "size": "20"},
+                {"price": ".46", "size": "15"}
+            ],
+            "asks": [
+                {"price": ".52", "size": "25"},
+                {"price": ".53", "size": "60"},
+                {"price": ".54", "size": "10"}
+            ],
+            "timestamp": "123456789000",
+            "hash": "0x1234abcd"
+        }
+        
+        msg = BookMessage.from_dict(data)
+        
+        self.assertEqual(msg.event_type, "book")
+        self.assertEqual(len(msg.bids), 3)
+        self.assertEqual(len(msg.asks), 3)
+        self.assertAlmostEqual(msg.best_bid_price, 0.48)
+        self.assertAlmostEqual(msg.best_ask_price, 0.52)
+        self.assertAlmostEqual(msg.mid_price, 0.50)
+        self.assertAlmostEqual(msg.spread, 0.04)
+        self.assertEqual(msg.ts_ms, 123456789000)
+    
+    def test_book_message_empty_book(self):
+        """Test BookMessage with empty order book."""
+        data = {
+            "event_type": "book",
+            "asset_id": "test_token",
+            "market": "0xtest",
+            "bids": [],
+            "asks": [],
+            "timestamp": "123456789000",
+            "hash": "0x0"
+        }
+        
+        msg = BookMessage.from_dict(data)
+        
+        self.assertIsNone(msg.best_bid)
+        self.assertIsNone(msg.best_ask)
+        self.assertIsNone(msg.best_bid_price)
+        self.assertIsNone(msg.best_ask_price)
+        self.assertIsNone(msg.mid_price)
+    
+    def test_price_change_parsing(self):
+        """Test PriceChange parsing."""
+        data = {
+            "asset_id": "71321045679252212594626385532706912750332728571942532289631379312455583992563",
+            "price": "0.5",
+            "size": "200",
+            "side": "BUY",
+            "hash": "56621a121a47ed9333273e21c83b660cff37ae50",
+            "best_bid": "0.5",
+            "best_ask": "1"
+        }
+        
+        change = PriceChange.from_dict(data)
+        
+        self.assertAlmostEqual(change.price_float, 0.5)
+        self.assertAlmostEqual(change.size_float, 200.0)
+        self.assertTrue(change.is_bid)
+        self.assertFalse(change.is_ask)
+        self.assertAlmostEqual(change.best_bid_float, 0.5)
+        self.assertAlmostEqual(change.best_ask_float, 1.0)
+        self.assertFalse(change.is_removal)
+    
+    def test_price_change_removal(self):
+        """Test PriceChange for level removal."""
+        data = {
+            "asset_id": "test_token",
+            "price": "0.5",
+            "size": "0",  # Size 0 = removal
+            "side": "SELL",
+            "hash": "test",
+            "best_bid": "0.49",
+            "best_ask": "0.51"
+        }
+        
+        change = PriceChange.from_dict(data)
+        
+        self.assertTrue(change.is_removal)
+        self.assertTrue(change.is_ask)
+    
+    def test_price_change_message_parsing(self):
+        """Test PriceChangeMessage parsing with multiple changes."""
+        data = {
+            "market": "0x5f65177b394277fd294cd75650044e32ba009a95022d88a0c1d565897d72f8f1",
+            "price_changes": [
+                {
+                    "asset_id": "token_1",
+                    "price": "0.5",
+                    "size": "200",
+                    "side": "BUY",
+                    "hash": "hash1",
+                    "best_bid": "0.5",
+                    "best_ask": "1"
+                },
+                {
+                    "asset_id": "token_2",
+                    "price": "0.5",
+                    "size": "200",
+                    "side": "SELL",
+                    "hash": "hash2",
+                    "best_bid": "0",
+                    "best_ask": "0.5"
+                }
+            ],
+            "timestamp": "1757908892351",
+            "event_type": "price_change"
+        }
+        
+        msg = PriceChangeMessage.from_dict(data)
+        
+        self.assertEqual(msg.event_type, "price_change")
+        self.assertEqual(len(msg.price_changes), 2)
+        self.assertEqual(msg.affected_assets, {"token_1", "token_2"})
+        self.assertEqual(msg.ts_ms, 1757908892351)
+        
+        # Test get_changes_for_asset
+        token1_changes = msg.get_changes_for_asset("token_1")
+        self.assertEqual(len(token1_changes), 1)
+        self.assertTrue(token1_changes[0].is_bid)
+        
+        # Test get_best_bbo
+        bid, ask = msg.get_best_bbo("token_2")
+        self.assertAlmostEqual(bid, 0.0)
+        self.assertAlmostEqual(ask, 0.5)
+    
+    def test_last_trade_price_parsing(self):
+        """Test LastTradePriceMessage parsing."""
+        data = {
+            "asset_id": "114122071509644379678018727908709560226618148003371446110114509806601493071694",
+            "event_type": "last_trade_price",
+            "fee_rate_bps": "0",
+            "market": "0x6a67b9d828d53862160e470329ffea5246f338ecfffdf2cab45211ec578b0347",
+            "price": "0.456",
+            "side": "BUY",
+            "size": "219.217767",
+            "timestamp": "1750428146322"
+        }
+        
+        msg = LastTradePriceMessage.from_dict(data)
+        
+        self.assertEqual(msg.event_type, "last_trade_price")
+        self.assertAlmostEqual(msg.price_float, 0.456)
+        self.assertAlmostEqual(msg.size_float, 219.217767)
+        self.assertTrue(msg.is_buy)
+        self.assertEqual(msg.fee_bps, 0)
+        self.assertAlmostEqual(msg.notional, 0.456 * 219.217767, places=4)
+    
+    def test_best_bid_ask_parsing(self):
+        """Test BestBidAskMessage parsing."""
+        data = {
+            "event_type": "best_bid_ask",
+            "market": "0x0005c0d312de0be897668695bae9f32b624b4a1ae8b140c49f08447fcc74f442",
+            "asset_id": "85354956062430465315924116860125388538595433819574542752031640332592237464430",
+            "best_bid": "0.73",
+            "best_ask": "0.77",
+            "spread": "0.04",
+            "timestamp": "1766789469958"
+        }
+        
+        msg = BestBidAskMessage.from_dict(data)
+        
+        self.assertEqual(msg.event_type, "best_bid_ask")
+        self.assertAlmostEqual(msg.best_bid_float, 0.73)
+        self.assertAlmostEqual(msg.best_ask_float, 0.77)
+        self.assertAlmostEqual(msg.spread_float, 0.04)
+        self.assertAlmostEqual(msg.mid_price, 0.75)
+    
+    def test_tick_size_change_parsing(self):
+        """Test TickSizeChangeMessage parsing."""
+        data = {
+            "event_type": "tick_size_change",
+            "asset_id": "65818619657568813474341868652308942079804919287380422192892211131408793125422",
+            "market": "0xbd31dc8a20211944f6b70f31557f1001557b59905b7738480ca09bd4532f84af",
+            "old_tick_size": "0.01",
+            "new_tick_size": "0.001",
+            "side": "buy",
+            "timestamp": "100000000"
+        }
+        
+        msg = TickSizeChangeMessage.from_dict(data)
+        
+        self.assertEqual(msg.event_type, "tick_size_change")
+        self.assertAlmostEqual(msg.old_tick_size_float, 0.01)
+        self.assertAlmostEqual(msg.new_tick_size_float, 0.001)
+    
+    def test_new_market_parsing(self):
+        """Test NewMarketMessage parsing."""
+        data = {
+            "id": "1031769",
+            "question": "Will NVIDIA (NVDA) close above $240 end of January?",
+            "market": "0x311d0c4b6671ab54af4970c06fcf58662516f5168997bdda209ec3db5aa6b0c1",
+            "slug": "nvda-above-240-on-january-30-2026",
+            "description": "This market will resolve...",
+            "assets_ids": [
+                "76043073756653678226373981964075571318267289248134717369284518995922789326425",
+                "31690934263385727664202099278545688007799199447969475608906331829650099442770"
+            ],
+            "outcomes": ["Yes", "No"],
+            "event_message": {
+                "id": "125819",
+                "ticker": "nvda-above-in-january-2026",
+                "slug": "nvda-above-in-january-2026",
+                "title": "Will NVIDIA (NVDA) close above ___ end of January?",
+                "description": "Market group description..."
+            },
+            "timestamp": "1766790415550",
+            "event_type": "new_market"
+        }
+        
+        msg = NewMarketMessage.from_dict(data)
+        
+        self.assertEqual(msg.event_type, "new_market")
+        self.assertEqual(msg.id, "1031769")
+        self.assertIn("NVIDIA", msg.question)
+        self.assertEqual(len(msg.assets_ids), 2)
+        self.assertEqual(msg.outcomes, ("Yes", "No"))
+        self.assertIsNotNone(msg.event_message)
+        self.assertEqual(msg.event_message.ticker, "nvda-above-in-january-2026")
+        self.assertEqual(msg.token_yes, msg.assets_ids[0])
+        self.assertEqual(msg.token_no, msg.assets_ids[1])
+    
+    def test_market_resolved_parsing(self):
+        """Test MarketResolvedMessage parsing."""
+        data = {
+            "id": "1031769",
+            "question": "Will NVIDIA (NVDA) close above $240?",
+            "market": "0x311d0c4b6671ab54af4970c06fcf58662516f5168997bdda209ec3db5aa6b0c1",
+            "slug": "nvda-above-240",
+            "description": "Test description",
+            "assets_ids": ["yes_token", "no_token"],
+            "outcomes": ["Yes", "No"],
+            "winning_asset_id": "yes_token",
+            "winning_outcome": "Yes",
+            "event_message": None,
+            "timestamp": "1766790415550",
+            "event_type": "market_resolved"
+        }
+        
+        msg = MarketResolvedMessage.from_dict(data)
+        
+        self.assertEqual(msg.event_type, "market_resolved")
+        self.assertEqual(msg.winning_outcome, "Yes")
+        self.assertEqual(msg.winning_asset_id, "yes_token")
+    
+    def test_parse_ws_message_book(self):
+        """Test parse_ws_message with book event."""
+        data = {
+            "event_type": "book",
+            "asset_id": "test",
+            "market": "0x123",
+            "bids": [{"price": "0.5", "size": "100"}],
+            "asks": [{"price": "0.6", "size": "100"}],
+            "timestamp": "123456",
+            "hash": "0x0"
+        }
+        
+        msg = parse_ws_message(data)
+        
+        self.assertIsInstance(msg, BookMessage)
+        self.assertEqual(msg.event_type, "book")
+    
+    def test_parse_ws_message_price_change(self):
+        """Test parse_ws_message with price_change event."""
+        data = {
+            "event_type": "price_change",
+            "market": "0x123",
+            "timestamp": "123456",
+            "price_changes": []
+        }
+        
+        msg = parse_ws_message(data)
+        
+        self.assertIsInstance(msg, PriceChangeMessage)
+    
+    def test_parse_ws_message_unknown(self):
+        """Test parse_ws_message with unknown event type."""
+        data = {
+            "event_type": "unknown_type",
+            "some_field": "value"
+        }
+        
+        msg = parse_ws_message(data)
+        
+        self.assertIsNone(msg)
+    
+    def test_parse_ws_messages_batch(self):
+        """Test parse_ws_messages with batch of messages."""
+        raw = json.dumps([
+            {
+                "event_type": "book",
+                "asset_id": "test1",
+                "market": "0x1",
+                "bids": [],
+                "asks": [],
+                "timestamp": "1",
+                "hash": "0x"
+            },
+            {
+                "event_type": "last_trade_price",
+                "asset_id": "test2",
+                "market": "0x2",
+                "price": "0.5",
+                "size": "100",
+                "side": "BUY",
+                "fee_rate_bps": "0",
+                "timestamp": "2"
+            },
+            {
+                "event_type": "unknown",
+                "ignored": True
+            }
+        ])
+        
+        messages = parse_ws_messages(raw)
+        
+        # Should have 2 valid messages (unknown is filtered out)
+        self.assertEqual(len(messages), 2)
+        self.assertIsInstance(messages[0], BookMessage)
+        self.assertIsInstance(messages[1], LastTradePriceMessage)
+    
+    def test_parse_ws_messages_single(self):
+        """Test parse_ws_messages with single message."""
+        raw = json.dumps({
+            "event_type": "best_bid_ask",
+            "market": "0x1",
+            "asset_id": "test",
+            "best_bid": "0.5",
+            "best_ask": "0.6",
+            "spread": "0.1",
+            "timestamp": "123"
+        })
+        
+        messages = parse_ws_messages(raw)
+        
+        self.assertEqual(len(messages), 1)
+        self.assertIsInstance(messages[0], BestBidAskMessage)
+    
+    def test_parse_ws_messages_invalid_json(self):
+        """Test parse_ws_messages with invalid JSON."""
+        raw = "not valid json {"
+        
+        messages = parse_ws_messages(raw)
+        
+        self.assertEqual(messages, [])
+    
+    def test_book_message_serialization(self):
+        """Test BookMessage serialization to dict."""
+        data = {
+            "event_type": "book",
+            "asset_id": "token123",
+            "market": "0xmarket",
+            "bids": [{"price": "0.45", "size": "100"}],
+            "asks": [{"price": "0.55", "size": "200"}],
+            "timestamp": "999",
+            "hash": "0xhash"
+        }
+        
+        msg = BookMessage.from_dict(data)
+        d = msg.to_dict()
+        
+        self.assertEqual(d["type"], "book_message")
+        self.assertEqual(d["asset_id"], "token123")
+        self.assertAlmostEqual(d["best_bid"], 0.45)
+        self.assertAlmostEqual(d["best_ask"], 0.55)
+        
+        # Should be JSON serializable
+        json_str = json.dumps(d)
+        self.assertIsInstance(json_str, str)
+    
+    def test_price_change_message_serialization(self):
+        """Test PriceChangeMessage serialization."""
+        data = {
+            "event_type": "price_change",
+            "market": "0x123",
+            "timestamp": "456",
+            "price_changes": [
+                {
+                    "asset_id": "tok",
+                    "price": "0.5",
+                    "size": "10",
+                    "side": "BUY",
+                    "hash": "h",
+                    "best_bid": "0.5",
+                    "best_ask": "0.6"
+                }
+            ]
+        }
+        
+        msg = PriceChangeMessage.from_dict(data)
+        d = msg.to_dict()
+        
+        self.assertEqual(d["type"], "price_change_message")
+        self.assertEqual(len(d["price_changes"]), 1)
+        
+        # JSON serializable
+        json.dumps(d)
+
+
+class TestHealthEventFactories(unittest.TestCase):
+    """Tests for HealthEvent factory methods."""
+    
+    def test_connected_factory(self):
+        """Test HealthEvent.connected() factory."""
+        event = HealthEvent.connected("test_connector", "Connected to server")
+        
+        self.assertEqual(event.connector_name, "test_connector")
+        self.assertEqual(event.event_type, "connected")
+        self.assertEqual(event.message, "Connected to server")
+        self.assertIsNotNone(event.ts_ms)
+    
+    def test_disconnected_factory(self):
+        """Test HealthEvent.disconnected() factory."""
+        event = HealthEvent.disconnected("test_connector")
+        
+        self.assertEqual(event.event_type, "disconnected")
+        self.assertEqual(event.message, "Disconnected")
+    
+    def test_error_factory(self):
+        """Test HealthEvent.error() factory."""
+        event = HealthEvent.error("test_connector", "Connection refused", {"code": 404})
+        
+        self.assertEqual(event.event_type, "error")
+        self.assertEqual(event.message, "Connection refused")
+        self.assertEqual(event.details["code"], 404)
+    
+    def test_reconnecting_factory(self):
+        """Test HealthEvent.reconnecting() factory."""
+        event = HealthEvent.reconnecting("test_connector", 3)
+        
+        self.assertEqual(event.event_type, "reconnecting")
+        self.assertIn("attempt 3", event.message)
+        self.assertEqual(event.details["attempt"], 3)
 
 
 if __name__ == "__main__":

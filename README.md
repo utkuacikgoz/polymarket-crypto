@@ -15,6 +15,7 @@ Track short-term crypto prediction markets on Polymarket (e.g., "Bitcoin Up or D
 - **T-Minute Market Discovery**: Automatically find and track short-term crypto markets (configurable duration)
 - **Multi-Coin Support**: Configure target coins (BTC, ETH, SOL, etc.)
 - **Multi-Symbol Binance Connector**: Stream best bid/ask for multiple trading pairs
+- **Chainlink Oracle Prices**: Real-time Chainlink price feeds via RTDS (Real-Time Data Service)
 - **Real-time Price Streaming**: WebSocket streaming with automatic REST fallback
 - **Thread-safe Architecture**: Uses `threading.Thread`, `queue.Queue`, `threading.Event`, and locks
 - **Pub/Sub Event Bus**: Loosely coupled components via queue-based publish/subscribe
@@ -70,9 +71,19 @@ python app.py
 
 ### 4. Example Output
 
+The status display shows unified per-asset pricing with all three data sources:
+
 ```
-[2024-02-06 12:30:00] Markets: 3 | Binance: BTC:$65,973(42ms) | ETH:$2,845(38ms) | PM: 6 tokens (150ms ago) | Health: BIN:✓ GAM:✓ WS:✓
+[2024-02-06 12:30:00] Health: BIN:✓ GAM:✓ WS:✓ RTDS:✓
+  [BTC-15M exp:12:45:00] Bin:$65973.50[65973.00/65974.00](42ms) | CL:$65970.50(1200ms) | UP:0.520*150.0/0.530*200.0(85ms) DOWN:0.470*180.0/0.480*120.0(85ms)
+  [ETH-15M exp:12:45:00] Bin:$2845.30[2845.10/2845.50](38ms) | CL:$2844.80(1150ms) | UP:0.480*100.0/0.490*150.0(90ms) DOWN:0.510*120.0/0.520*100.0(90ms)
 ```
+
+Each line shows:
+- **Series & Expiry**: `[BTC-15M exp:12:45:00]`
+- **Binance**: Mid price with bid/ask and latency
+- **Chainlink (CL)**: Oracle price with latency
+- **Polymarket (UP/DOWN)**: Bid price*qty / Ask price*qty with latency
 
 ## Project Structure
 
@@ -91,10 +102,19 @@ polymarket/
 │   ├── binance_ws.py           # Binance WebSocket (multi-symbol)
 │   ├── polymarket_gamma.py     # Gamma API market discovery (multi-market)
 │   ├── polymarket_clob_ws.py   # CLOB WebSocket connector (multi-market)
-│   └── polymarket_clob_rest.py # CLOB REST fallback (multi-market)
+│   ├── polymarket_clob_rest.py # CLOB REST fallback (multi-market)
+│   └── rtds_chainlink.py       # RTDS Chainlink price feed connector
+├── models/
+│   ├── __init__.py
+│   ├── common.py               # Shared enums and utilities
+│   ├── binance.py              # Binance-specific models
+│   ├── polymarket_ws.py        # Polymarket WebSocket models
+│   ├── polymarket_rest.py      # Polymarket REST models
+│   ├── rtds.py                 # RTDS/Chainlink price models
+│   └── health.py               # Health monitoring models
 ├── tests/
 │   ├── __init__.py
-│   └── test_connectors.py      # Unit tests (31 tests)
+│   └── test_connectors.py      # Unit tests (54+ tests)
 └── logs/
     └── connectors.jsonl        # Structured logs (auto-created)
 ```
@@ -155,6 +175,22 @@ POLYMARKET_CLOB_REST_URL=https://clob.polymarket.com
 
 # Health monitoring - if WS unhealthy for this long, activate REST fallback
 POLYMARKET_WS_UNHEALTHY_THRESHOLD_SEC=30.0
+```
+
+### RTDS Chainlink Configuration
+
+Chainlink price feeds are **automatically derived** from your `POLYMARKET_SERIES` configuration.
+For example: `POLYMARKET_SERIES=BTC-15M,ETH-15M` → subscribes to `btc/usd,eth/usd`
+
+```bash
+# RTDS WebSocket URL for Chainlink price feeds (optional override)
+# Docs: https://docs.polymarket.com/developers/RTDS/RTDS-crypto-prices
+RTDS_WS_URL=wss://rtds.polymarket.com
+
+# Connection settings
+RTDS_PING_INTERVAL_SEC=30.0           # Keep-alive ping interval
+RTDS_RECONNECT_DELAY_BASE_SEC=1.0     # Initial reconnect delay
+RTDS_RECONNECT_DELAY_MAX_SEC=60.0     # Maximum reconnect delay
 ```
 
 ### Logging Configuration
