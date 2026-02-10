@@ -101,6 +101,52 @@ class BinanceConfig:
         """Get WebSocket URL for a single symbol."""
         return f"{self.ws_base_url}/ws/{symbol.lower()}@bookTicker"
 
+    USDT_USD_PROXY = "usdcusdt"
+
+    @staticmethod
+    def get_binance_symbols_for_series(target_series: tuple, include_usdt_usd: bool = True) -> tuple:
+        """Get Binance symbol format for configured Polymarket series.
+        
+        Maps series like ("BTC", "15M") to Binance format "btcusdt".
+        Also includes USDTUSD for USDT/USD conversion if include_usdt_usd=True.
+        
+        Args:
+            target_series: Tuple of (coin, duration) pairs from PolymarketGammaConfig
+            include_usdt_usd: Whether to include USDTUSD for USD price conversion
+            
+        Returns:
+            Tuple of Binance symbol strings (e.g., ("btcusdt", "ethusdt", "usdtusd"))
+        """
+        symbols = set()
+        for coin, duration in target_series:
+            symbols.add(f"{coin.lower()}usdt")
+        
+        # Always include USDT/USD proxy for USD conversion
+        if include_usdt_usd:
+            symbols.add(BinanceConfig.USDT_USD_PROXY)
+        
+        return tuple(sorted(symbols))
+
+    def with_symbols_from_series(self, target_series: tuple) -> "BinanceConfig":
+        """Return a new BinanceConfig with symbols derived from Polymarket series.
+        
+        Args:
+            target_series: Tuple of (coin, duration) pairs from PolymarketGammaConfig
+            
+        Returns:
+            New BinanceConfig instance with derived symbols
+        """
+        derived_symbols = self.get_binance_symbols_for_series(target_series)
+        return BinanceConfig(
+            ws_base_url=self.ws_base_url,
+            symbols=derived_symbols,
+            ping_interval_sec=self.ping_interval_sec,
+            ping_timeout_sec=self.ping_timeout_sec,
+            reconnect_delay_base_sec=self.reconnect_delay_base_sec,
+            reconnect_delay_max_sec=self.reconnect_delay_max_sec,
+            ssl_verify=self.ssl_verify,
+        )
+
 
 @dataclass(frozen=True)
 class PolymarketGammaConfig:
@@ -327,7 +373,15 @@ class LoggingConfig:
 
 @dataclass(frozen=True)
 class AppConfig:
-    """Main application configuration."""
+    """Main application configuration.
+    
+    Important: Binance and RTDS symbols are derived from the Polymarket target series.
+    This ensures we only subscribe to feeds for coins we're actually trading on Polymarket.
+    
+    Example: If gamma.target_series = [("BTC", "15M"), ("ETH", "1H")]
+        - Binance will subscribe to: btcusdt, ethusdt
+        - Chainlink will subscribe to: btc/usd, eth/usd
+    """
     
     binance: BinanceConfig = field(default_factory=BinanceConfig.from_env)
     gamma: PolymarketGammaConfig = field(default_factory=PolymarketGammaConfig.from_env)
@@ -341,14 +395,44 @@ class AppConfig:
     # Health monitoring
     health_check_interval_sec: float = 5.0
     
+    def get_subscribed_coins(self) -> tuple:
+        """Get the unique coins from target series.
+        
+        Returns:
+            Tuple of coin symbols (e.g., ("BTC", "ETH"))
+        """
+        coins = set()
+        for coin, duration in self.gamma.target_series:
+            coins.add(coin.upper())
+        return tuple(sorted(coins))
+    
+    def get_binance_symbols(self) -> tuple:
+        """Get Binance symbols derived from Polymarket target series."""
+        return BinanceConfig.get_binance_symbols_for_series(self.gamma.target_series)
+    
+    def get_chainlink_symbols(self) -> tuple:
+        """Get Chainlink symbols derived from Polymarket target series."""
+        return RTDSConfig.get_chainlink_symbols_for_series(self.gamma.target_series)
+    
     @classmethod
     def from_env(cls, env_file: str = ".env") -> "AppConfig":
-        """Create full configuration from environment variables."""
+        """Create full configuration from environment variables.
+        
+        Binance and RTDS symbols are automatically derived from the Polymarket
+        target series (POLYMARKET_SERIES env var or default).
+        """
         _load_env_file(env_file)
         
+        # Load Gamma config first to derive other configs from its target_series
+        gamma_config = PolymarketGammaConfig.from_env()
+        
+        # Create Binance config with symbols derived from Polymarket series
+        base_binance = BinanceConfig.from_env()
+        binance_config = base_binance.with_symbols_from_series(gamma_config.target_series)
+        
         return cls(
-            binance=BinanceConfig.from_env(),
-            gamma=PolymarketGammaConfig.from_env(),
+            binance=binance_config,
+            gamma=gamma_config,
             clob=PolymarketClobConfig.from_env(),
             rtds=RTDSConfig.from_env(),
             logging=LoggingConfig.from_env(),
