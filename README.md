@@ -66,7 +66,7 @@ cp .env.example .env
 ### 3. Run the Application
 
 ```bash
-python app.py
+python main.py
 ```
 
 ### 4. Example Output
@@ -80,6 +80,7 @@ The status display shows unified per-asset pricing with all three data sources:
 ```
 
 Each line shows:
+
 - **Series & Expiry**: `[BTC-15M exp:12:45:00]`
 - **Binance**: Mid price with bid/ask and latency
 - **Chainlink (CL)**: Oracle price with latency
@@ -89,9 +90,10 @@ Each line shows:
 
 ```
 polymarket/
-├── app.py                      # Main orchestrator - wires everything together
+├── main.py                     # Entry point - wires config, strategies, orchestrator
+├── connector_orchestrator.py   # Orchestrator - manages connectors and lifecycle
 ├── config.py                   # Configuration management (loads from .env)
-├── models.py                   # Data models (immutable dataclasses)
+├── strategy.py                 # Strategy framework (BaseStrategy, MarketDataUpdate)
 ├── pubsub.py                   # Thread-safe pub/sub event bus
 ├── logging_utils.py            # JSONL structured logging
 ├── requirements.txt            # Python dependencies
@@ -185,7 +187,7 @@ For example: `POLYMARKET_SERIES=BTC-15M,ETH-15M` → subscribes to `btc/usd,eth/
 ```bash
 # RTDS WebSocket URL for Chainlink price feeds (optional override)
 # Docs: https://docs.polymarket.com/developers/RTDS/RTDS-crypto-prices
-RTDS_WS_URL=wss://rtds.polymarket.com
+RTDS_WS_URL=wss://ws-live-data.polymarket.com
 
 # Connection settings
 RTDS_PING_INTERVAL_SEC=30.0           # Keep-alive ping interval
@@ -210,7 +212,7 @@ LOG_FILE_LEVEL=DEBUG               # File log level
 ### Basic Usage - Run the Orchestrator
 
 ```python
-from app import ConnectorOrchestrator
+from connector_orchestrator import ConnectorOrchestrator
 
 # Create and run the orchestrator
 orchestrator = ConnectorOrchestrator()
@@ -229,8 +231,8 @@ config = AppConfig(
         ping_interval_sec=20.0
     ),
     gamma=PolymarketGammaConfig(
-        search_keywords=("BTC", "Bitcoin", "ETH", "Ethereum"),
-        max_markets=5
+        target_series=(("BTC", "15M"), ("ETH", "15M")),
+        max_events_per_series=3
     )
 )
 
@@ -258,7 +260,7 @@ while True:
         print(f"Binance {tick.symbol}: ${tick.mid:,.2f}")
     except queue.Empty:
         pass
-    
+
     try:
         # Get Polymarket price
         pm_tick = pm_sub.get(timeout=1.0)
@@ -415,12 +417,12 @@ When the Polymarket WebSocket is unhealthy for more than `POLYMARKET_WS_UNHEALTH
 
 ## Pub/Sub Topics
 
-| Topic | Event Type | Description |
-|-------|-----------|-------------|
-| `binance_ticks` | `PriceTick` | Real-time Binance price updates |
-| `market_spec` | `MarketSpec` | New market discoveries |
-| `polymarket_prices` | `MarketPriceTick` | Polymarket price updates |
-| `health` | `HealthEvent` | Connector health changes |
+| Topic               | Event Type        | Description                     |
+| ------------------- | ----------------- | ------------------------------- |
+| `binance_ticks`     | `PriceTick`       | Real-time Binance price updates |
+| `market_spec`       | `MarketSpec`      | New market discoveries          |
+| `polymarket_prices` | `MarketPriceTick` | Polymarket price updates        |
+| `health`            | `HealthEvent`     | Connector health changes        |
 
 ## Running Tests
 
@@ -465,6 +467,7 @@ cat logs/connectors.jsonl | jq -r '.level' | sort | uniq -c
 ### No Markets Found
 
 If no Polymarket markets are discovered:
+
 1. Check `POLYMARKET_SEARCH_KEYWORDS` includes relevant terms
 2. Verify Polymarket has active markets matching your keywords
 3. Check logs for "No matching markets found" messages
@@ -472,6 +475,7 @@ If no Polymarket markets are discovered:
 ### WebSocket Disconnections
 
 If WebSocket keeps disconnecting:
+
 1. Check network connectivity
 2. Verify API endpoints are correct
 3. Look for rate limiting messages in logs
@@ -480,6 +484,7 @@ If WebSocket keeps disconnecting:
 ### High Latency
 
 If data is delayed:
+
 1. Check `*_ago` values in status output
 2. Verify no REST fallback is active (indicates WS issues)
 3. Check system resources (CPU, memory)

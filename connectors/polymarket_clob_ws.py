@@ -533,21 +533,7 @@ class PolymarketClobWebSocketConnector(BaseConnector):
         if last_bbo != current_bbo and (best_bid is not None or best_ask is not None):
             self._last_logged_bbo[asset_id] = current_bbo
             
-            bid_str = f"{best_bid:.4f}" if best_bid else "N/A"
-            ask_str = f"{best_ask:.4f}" if best_ask else "N/A"
-            bid_qty_str = f"({best_bid_qty:.0f})" if best_bid_qty else ""
-            ask_qty_str = f"({best_ask_qty:.0f})" if best_ask_qty else ""
-            
-            # self.logger.info(
-            #     f"[{series_key}] {outcome_side}: Bid={bid_str}{bid_qty_str} Ask={ask_str}{ask_qty_str}",
-            #     series=series_key,
-            #     side=outcome_side,
-            #     best_bid=best_bid,
-            #     best_ask=best_ask,
-            #     bid_qty=best_bid_qty,
-            #     ask_qty=best_ask_qty,
-            #     token_id=asset_id[:20] + "..."
-            # )
+            pass
         
         # Calculate mid price and publish tick
         mid_price = msg.mid_price
@@ -578,19 +564,6 @@ class PolymarketClobWebSocketConnector(BaseConnector):
             market_id = self._token_to_market.get(asset_id, msg.market)
             outcome_side = self._token_to_side.get(asset_id, "?")
             series_key = self._token_to_series.get(asset_id, "Unknown")
-            
-            # Log the price change
-            # side_str = "Bid" if change.is_bid else "Ask" if change.is_ask else "?"
-            # size_str = f"({change.size_float:.0f})" if change.size else ""
-            # self.logger.info(
-            #     f"[{series_key}] {outcome_side}: {side_str}={change.price_float:.4f}{size_str}",
-            #     series=series_key,
-            #     side=outcome_side,
-            #     price_side=change.side,
-            #     price=change.price_float,
-            #     size=change.size_float if change.size else None,
-            #     token_id=asset_id[:20] + "..."
-            # )
             
             # Update BBO tracking
             best_bid, best_ask = change.best_bid_float, change.best_ask_float
@@ -665,16 +638,6 @@ class PolymarketClobWebSocketConnector(BaseConnector):
         
         if last_bbo != current_bbo:
             self._last_logged_bbo[asset_id] = current_bbo
-            
-            # self.logger.info(
-            #     f"[{series_key}] {outcome_side}: BBO Bid={msg.best_bid_float:.4f} Ask={msg.best_ask_float:.4f} Spread={msg.spread_float:.4f}",
-            #     series=series_key,
-            #     side=outcome_side,
-            #     best_bid=msg.best_bid_float,
-            #     best_ask=msg.best_ask_float,
-            #     spread=msg.spread_float,
-            #     token_id=asset_id[:20] + "..."
-            # )
         
         mid_price = msg.mid_price
         tick = MarketPriceTick(

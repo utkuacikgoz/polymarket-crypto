@@ -378,7 +378,7 @@ class ConnectorOrchestrator:
             except Exception as e:
                 logger.debug(f"Error collecting data: {e}")
             
-            #time.sleep(0.001)
+            time.sleep(0.001)
     
     def _update_polymarket_series_index(self, tick: MarketPriceTick) -> None:
         """Update the Polymarket series index for easy access by series_key."""

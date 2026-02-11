@@ -276,10 +276,8 @@ class PolymarketClobRestConnector(BaseConnector):
         if price is None or price <= 0:
             return
         
-        # Get market ID
-        market_id = ""
-        if self._current_market:
-            market_id = self._current_market.market_id
+        # Get market ID from token mapping
+        market_id = self._token_to_market.get(token_id, "")
         
         # Create and publish tick
         tick = MarketPriceTick(
@@ -318,7 +316,7 @@ class PolymarketClobRestConnector(BaseConnector):
         Returns:
             Dictionary of token_id -> price
         """
-        tokens = token_ids or self._token_ids
+        tokens = token_ids or self._get_all_token_ids()
         
         if not tokens:
             return {}
