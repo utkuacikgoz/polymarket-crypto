@@ -2,7 +2,7 @@
 # Threading-based connectors for Binance and Polymarket
 
 # Core dependencies
-websocket-client>=1.6.0
+websocket-client>=1.9.0
 requests>=2.31.0
 
 
