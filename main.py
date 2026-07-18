@@ -6,13 +6,11 @@ Usage:
     python main.py
 """
 
-import signal
-import sys
 
 from config import AppConfig
 from connector_orchestrator import ConnectorOrchestrator
-from strategy import LoggingStrategy
 from logging_utils import get_logger
+from strategy import LoggingStrategy
 
 logger = get_logger("main")
 

@@ -6,8 +6,8 @@ Docs: https://docs.polymarket.com/developers/RTDS/RTDS-crypto-prices
 """
 
 from dataclasses import dataclass
-from typing import Dict, Any, Optional
 from enum import Enum
+from typing import Any
 
 
 class RTDSSource(Enum):
@@ -20,11 +20,11 @@ class RTDSSource(Enum):
 class ChainlinkPriceTick:
     """
     A single price tick from Chainlink oracle via RTDS.
-    
+
     Chainlink prices are oracle-based reference prices, typically
     updated less frequently than exchange prices but considered
     more reliable for settlement purposes.
-    
+
     Attributes:
         ts_ms: Timestamp when the message was received (epoch milliseconds)
         price_ts_ms: Timestamp when the price was recorded by Chainlink
@@ -38,7 +38,7 @@ class ChainlinkPriceTick:
     price: float
     source: RTDSSource = RTDSSource.CHAINLINK
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSONL logging."""
         return {
             "type": "chainlink_price_tick",
@@ -50,10 +50,10 @@ class ChainlinkPriceTick:
         }
 
     @classmethod
-    def from_rtds_message(cls, data: Dict[str, Any], received_ts_ms: int) -> "ChainlinkPriceTick":
+    def from_rtds_message(cls, data: dict[str, Any], received_ts_ms: int) -> "ChainlinkPriceTick":
         """
         Create ChainlinkPriceTick from RTDS WebSocket message.
-        
+
         RTDS message format:
         {
             "topic": "crypto_prices_chainlink",
@@ -65,11 +65,11 @@ class ChainlinkPriceTick:
                 "value": 3456.78
             }
         }
-        
+
         Args:
             data: The full RTDS message dict
             received_ts_ms: Timestamp when message was received
-            
+
         Returns:
             ChainlinkPriceTick instance
         """
@@ -88,7 +88,7 @@ class ChainlinkPriceTick:
         if "/" in self.symbol:
             return self.symbol.split("/")[0].upper()
         return self.symbol.upper()
-    
+
     @property
     def quote_currency(self) -> str:
         """Extract quote currency from symbol (e.g., 'usd' from 'eth/usd')."""
@@ -101,16 +101,16 @@ class ChainlinkPriceTick:
 class RTDSSubscription:
     """
     Represents an RTDS subscription request.
-    
+
     Used to build subscription messages for the WebSocket.
     """
     topic: str
     type: str = "*"
     filters: str = ""
-    
-    def to_subscribe_message(self) -> Dict[str, Any]:
+
+    def to_subscribe_message(self) -> dict[str, Any]:
         """Create the subscribe message for RTDS WebSocket.
-        
+
         Format matches official TypeScript client:
         {
             "action": "subscribe",
@@ -129,7 +129,7 @@ class RTDSSubscription:
                 "filters": self.filters  # Always include, empty string for all
             }]
         }
-    
+
     @classmethod
     def chainlink_all(cls) -> "RTDSSubscription":
         """Create subscription for all Chainlink prices."""
@@ -138,15 +138,15 @@ class RTDSSubscription:
             type="*",
             filters=""
         )
-    
+
     @classmethod
     def chainlink_symbol(cls, symbol: str) -> "RTDSSubscription":
         """
         Create subscription for a specific Chainlink symbol.
-        
+
         Args:
             symbol: Symbol in Chainlink format (e.g., "eth/usd")
-            
+
         Returns:
             RTDSSubscription for the specific symbol
         """
@@ -159,21 +159,21 @@ class RTDSSubscription:
         )
 
 
-def parse_rtds_message(data: Dict[str, Any], received_ts_ms: int) -> Optional[ChainlinkPriceTick]:
+def parse_rtds_message(data: dict[str, Any], received_ts_ms: int) -> ChainlinkPriceTick | None:
     """
     Parse an RTDS WebSocket message into a typed model.
-    
+
     Args:
         data: Parsed JSON message from WebSocket
         received_ts_ms: Timestamp when message was received
-        
+
     Returns:
         ChainlinkPriceTick if message is a Chainlink price update, None otherwise
     """
     topic = data.get("topic", "")
     msg_type = data.get("type", "")
-    
+
     if topic == "crypto_prices_chainlink" and msg_type == "update":
         return ChainlinkPriceTick.from_rtds_message(data, received_ts_ms)
-    
+
     return None

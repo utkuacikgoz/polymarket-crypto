@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Lint (ruff)
+        run: ruff check .
+      - name: Security lint (bandit)
+        run: bandit -q -r . -ll -x ./tests
+      - name: Tests + coverage
+        run: pytest -q --cov=. --cov-report=term-missing
+      - name: Dependency audit (CVEs)
+        run: pip-audit -r requirements.txt --strict
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # scan full history, not just the tip
+      - name: Install gitleaks
+        run: |
+          VERSION=8.24.3
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" -o gl.tgz
+          tar -xzf gl.tgz gitleaks
+          sudo install gitleaks /usr/local/bin/gitleaks
+      - name: Scan (repo + history)
+        run: gitleaks detect --redact --exit-code 1

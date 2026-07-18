@@ -8,53 +8,48 @@ This package contains data models organized by source:
 - polymarket_rest: Polymarket REST API models
 """
 
-from models.common import (
-    SourceType,
-    MarketStatus,
-    Side,
-    current_ts_ms,
-)
-
 from models.binance import (
     PriceTick,
 )
-
-from models.polymarket_ws import (
-    # Order book types
-    OrderSummary,
-    BookMessage,
-    # Price change types
-    PriceChange,
-    PriceChangeMessage,
-    # Trade types
-    LastTradePriceMessage,
-    # BBO types
-    BestBidAskMessage,
-    # Market lifecycle types
-    EventMessage,
-    NewMarketMessage,
-    MarketResolvedMessage,
-    # Tick size types
-    TickSizeChangeMessage,
-    # Parser
-    parse_ws_message,
-    PolymarketWSMessage,
+from models.common import (
+    MarketStatus,
+    Side,
+    SourceType,
+    current_ts_ms,
 )
-
-from models.polymarket_rest import (
-    MarketSpec,
-    MarketPriceTick,
-    MarketSnapshot,
-)
-
 from models.health import (
     ConnectorHealth,
     HealthEvent,
 )
-
+from models.polymarket_rest import (
+    MarketPriceTick,
+    MarketSnapshot,
+    MarketSpec,
+)
+from models.polymarket_ws import (
+    # BBO types
+    BestBidAskMessage,
+    BookMessage,
+    # Market lifecycle types
+    EventMessage,
+    # Trade types
+    LastTradePriceMessage,
+    MarketResolvedMessage,
+    NewMarketMessage,
+    # Order book types
+    OrderSummary,
+    PolymarketWSMessage,
+    # Price change types
+    PriceChange,
+    PriceChangeMessage,
+    # Tick size types
+    TickSizeChangeMessage,
+    # Parser
+    parse_ws_message,
+)
 from models.rtds import (
-    RTDSSource,
     ChainlinkPriceTick,
+    RTDSSource,
     RTDSSubscription,
     parse_rtds_message,
 )

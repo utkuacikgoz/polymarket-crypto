@@ -4,9 +4,9 @@ Binance-specific data models.
 Models for Binance WebSocket and REST API data.
 """
 
-from dataclasses import dataclass
-from typing import Dict, Any
 import time
+from dataclasses import dataclass
+from typing import Any
 
 from models.common import SourceType
 
@@ -15,7 +15,7 @@ from models.common import SourceType
 class PriceTick:
     """
     A single price tick from Binance spot exchange.
-    
+
     Attributes:
         ts_ms: Timestamp in milliseconds (epoch)
         symbol: Trading pair symbol (e.g., "BTCUSDT")
@@ -31,7 +31,7 @@ class PriceTick:
     mid: float
     source: SourceType = SourceType.BINANCE
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSONL logging."""
         return {
             "type": "price_tick",
@@ -44,10 +44,10 @@ class PriceTick:
         }
 
     @classmethod
-    def from_binance_book_ticker(cls, data: Dict[str, Any]) -> "PriceTick":
+    def from_binance_book_ticker(cls, data: dict[str, Any]) -> "PriceTick":
         """
         Create PriceTick from Binance bookTicker message.
-        
+
         Binance bookTicker format:
         {
             "u": 400900217,     // order book updateId
@@ -73,7 +73,7 @@ class PriceTick:
     def spread(self) -> float:
         """Calculate bid-ask spread."""
         return self.ask - self.bid
-    
+
     @property
     def spread_bps(self) -> float:
         """Calculate bid-ask spread in basis points."""
