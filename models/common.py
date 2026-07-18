@@ -2,10 +2,9 @@
 Common types and utilities shared across all models.
 """
 
-from dataclasses import dataclass
-from enum import Enum
-from typing import Any, Dict
 import time
+from enum import Enum
+from typing import Any
 
 
 class SourceType(Enum):
@@ -28,7 +27,7 @@ class Side(Enum):
     """Order side."""
     BUY = "buy"
     SELL = "sell"
-    
+
     @classmethod
     def from_string(cls, s: str) -> "Side":
         """Parse side from string (case-insensitive)."""
@@ -47,7 +46,7 @@ def current_ts_ms() -> int:
 
 class SerializableMixin:
     """Mixin providing JSON serialization helpers."""
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSONL logging."""
         raise NotImplementedError("Subclasses must implement to_dict()")

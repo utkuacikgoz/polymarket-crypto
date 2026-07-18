@@ -13,12 +13,11 @@ Data models for all message types from the Polymarket CLOB WebSocket market chan
 Reference: https://docs.polymarket.com/developers/CLOB/websocket/market-channel
 """
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Union
 import json
+from dataclasses import dataclass
+from typing import Any
 
-from models.common import Side, SourceType, current_ts_ms
-
+from models.common import current_ts_ms
 
 # =============================================================================
 # Order Book Types
@@ -28,30 +27,30 @@ from models.common import Side, SourceType, current_ts_ms
 class OrderSummary:
     """
     A single price level in the order book.
-    
+
     Attributes:
         price: Price at this level (string to preserve precision)
         size: Total size available at this price level
     """
     price: str
     size: str
-    
+
     @property
     def price_float(self) -> float:
         """Get price as float."""
         return float(self.price)
-    
+
     @property
     def size_float(self) -> float:
         """Get size as float."""
         return float(self.size)
-    
-    def to_dict(self) -> Dict[str, str]:
+
+    def to_dict(self) -> dict[str, str]:
         """Serialize to dictionary."""
         return {"price": self.price, "size": self.size}
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "OrderSummary":
+    def from_dict(cls, data: dict[str, Any]) -> "OrderSummary":
         """Parse from API response dict."""
         return cls(
             price=str(data.get("price", "0")),
@@ -63,11 +62,11 @@ class OrderSummary:
 class BookMessage:
     """
     Full order book snapshot message.
-    
+
     Emitted when:
     - First subscribed to a market
     - When there is a trade that affects the book
-    
+
     Attributes:
         event_type: Always "book"
         asset_id: Token ID
@@ -84,7 +83,7 @@ class BookMessage:
     hash: str
     bids: tuple  # Tuple[OrderSummary, ...] for immutability
     asks: tuple  # Tuple[OrderSummary, ...]
-    
+
     @property
     def ts_ms(self) -> int:
         """Get timestamp as integer milliseconds."""
@@ -92,46 +91,46 @@ class BookMessage:
             return int(self.timestamp)
         except (ValueError, TypeError):
             return current_ts_ms()
-    
+
     @property
-    def best_bid(self) -> Optional[OrderSummary]:
+    def best_bid(self) -> OrderSummary | None:
         """Get the best (highest) bid."""
         return self.bids[0] if self.bids else None
-    
+
     @property
-    def best_ask(self) -> Optional[OrderSummary]:
+    def best_ask(self) -> OrderSummary | None:
         """Get the best (lowest) ask."""
         return self.asks[0] if self.asks else None
-    
+
     @property
-    def best_bid_price(self) -> Optional[float]:
+    def best_bid_price(self) -> float | None:
         """Get the best bid price as float."""
         return self.best_bid.price_float if self.best_bid else None
-    
+
     @property
-    def best_ask_price(self) -> Optional[float]:
+    def best_ask_price(self) -> float | None:
         """Get the best ask price as float."""
         return self.best_ask.price_float if self.best_ask else None
-    
+
     @property
-    def mid_price(self) -> Optional[float]:
+    def mid_price(self) -> float | None:
         """Calculate mid-price from best bid/ask."""
         bid = self.best_bid_price
         ask = self.best_ask_price
         if bid is not None and ask is not None:
             return (bid + ask) / 2
         return bid or ask
-    
+
     @property
-    def spread(self) -> Optional[float]:
+    def spread(self) -> float | None:
         """Calculate bid-ask spread."""
         bid = self.best_bid_price
         ask = self.best_ask_price
         if bid is not None and ask is not None:
             return ask - bid
         return None
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSONL logging."""
         return {
             "type": "book_message",
@@ -145,12 +144,12 @@ class BookMessage:
             "best_bid": self.best_bid_price,
             "best_ask": self.best_ask_price,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "BookMessage":
+    def from_dict(cls, data: dict[str, Any]) -> "BookMessage":
         """
         Parse from WebSocket message dict.
-        
+
         Expected format:
         {
             "event_type": "book",
@@ -164,10 +163,10 @@ class BookMessage:
         """
         bids_raw = data.get("bids", [])
         asks_raw = data.get("asks", [])
-        
+
         bids = tuple(OrderSummary.from_dict(b) for b in bids_raw)
         asks = tuple(OrderSummary.from_dict(a) for a in asks_raw)
-        
+
         return cls(
             event_type=data.get("event_type", "book"),
             asset_id=data.get("asset_id", ""),
@@ -187,7 +186,7 @@ class BookMessage:
 class PriceChange:
     """
     A single price change in an incremental update.
-    
+
     Attributes:
         asset_id: Token ID affected
         price: Price level affected
@@ -204,49 +203,49 @@ class PriceChange:
     hash: str
     best_bid: str
     best_ask: str
-    
+
     @property
     def price_float(self) -> float:
         """Get price as float."""
         return float(self.price)
-    
+
     @property
     def size_float(self) -> float:
         """Get size as float."""
         return float(self.size)
-    
+
     @property
-    def best_bid_float(self) -> Optional[float]:
+    def best_bid_float(self) -> float | None:
         """Get best bid as float."""
         try:
             return float(self.best_bid) if self.best_bid else None
         except (ValueError, TypeError):
             return None
-    
+
     @property
-    def best_ask_float(self) -> Optional[float]:
+    def best_ask_float(self) -> float | None:
         """Get best ask as float."""
         try:
             return float(self.best_ask) if self.best_ask else None
         except (ValueError, TypeError):
             return None
-    
+
     @property
     def is_bid(self) -> bool:
         """Check if this is a bid (buy) side change."""
         return self.side.upper() == "BUY"
-    
+
     @property
     def is_ask(self) -> bool:
         """Check if this is an ask (sell) side change."""
         return self.side.upper() == "SELL"
-    
+
     @property
     def is_removal(self) -> bool:
         """Check if this change removes a price level."""
         return self.size_float == 0
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         return {
             "asset_id": self.asset_id,
@@ -257,9 +256,9 @@ class PriceChange:
             "best_bid": self.best_bid,
             "best_ask": self.best_ask,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "PriceChange":
+    def from_dict(cls, data: dict[str, Any]) -> "PriceChange":
         """Parse from API response dict."""
         return cls(
             asset_id=data.get("asset_id", ""),
@@ -276,11 +275,11 @@ class PriceChange:
 class PriceChangeMessage:
     """
     Incremental order book update message.
-    
+
     Emitted when:
     - A new order is placed
     - An order is cancelled
-    
+
     Attributes:
         event_type: Always "price_change"
         market: Condition ID of market
@@ -291,7 +290,7 @@ class PriceChangeMessage:
     market: str
     timestamp: str
     price_changes: tuple  # Tuple[PriceChange, ...] for immutability
-    
+
     @property
     def ts_ms(self) -> int:
         """Get timestamp as integer milliseconds."""
@@ -299,20 +298,20 @@ class PriceChangeMessage:
             return int(self.timestamp)
         except (ValueError, TypeError):
             return current_ts_ms()
-    
+
     @property
     def affected_assets(self) -> set:
         """Get set of all asset IDs affected by this message."""
         return {pc.asset_id for pc in self.price_changes}
-    
-    def get_changes_for_asset(self, asset_id: str) -> List["PriceChange"]:
+
+    def get_changes_for_asset(self, asset_id: str) -> list["PriceChange"]:
         """Get all price changes for a specific asset."""
         return [pc for pc in self.price_changes if pc.asset_id == asset_id]
-    
+
     def get_best_bbo(self, asset_id: str) -> tuple:
         """
         Get the latest best bid/ask for an asset from the changes.
-        
+
         Returns:
             Tuple of (best_bid, best_ask) as floats, or (None, None)
         """
@@ -320,8 +319,8 @@ class PriceChangeMessage:
             if pc.asset_id == asset_id:
                 return (pc.best_bid_float, pc.best_ask_float)
         return (None, None)
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSONL logging."""
         return {
             "type": "price_change_message",
@@ -330,12 +329,12 @@ class PriceChangeMessage:
             "timestamp": self.timestamp,
             "price_changes": [pc.to_dict() for pc in self.price_changes],
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "PriceChangeMessage":
+    def from_dict(cls, data: dict[str, Any]) -> "PriceChangeMessage":
         """
         Parse from WebSocket message dict.
-        
+
         Expected format:
         {
             "market": "0x...",
@@ -357,7 +356,7 @@ class PriceChangeMessage:
         """
         changes_raw = data.get("price_changes", [])
         price_changes = tuple(PriceChange.from_dict(pc) for pc in changes_raw)
-        
+
         return cls(
             event_type=data.get("event_type", "price_change"),
             market=data.get("market", ""),
@@ -374,9 +373,9 @@ class PriceChangeMessage:
 class LastTradePriceMessage:
     """
     Last trade price notification.
-    
+
     Emitted when a maker and taker order is matched creating a trade event.
-    
+
     Attributes:
         event_type: Always "last_trade_price"
         asset_id: Token ID traded
@@ -395,7 +394,7 @@ class LastTradePriceMessage:
     side: str
     fee_rate_bps: str
     timestamp: str
-    
+
     @property
     def ts_ms(self) -> int:
         """Get timestamp as integer milliseconds."""
@@ -403,17 +402,17 @@ class LastTradePriceMessage:
             return int(self.timestamp)
         except (ValueError, TypeError):
             return current_ts_ms()
-    
+
     @property
     def price_float(self) -> float:
         """Get price as float."""
         return float(self.price)
-    
+
     @property
     def size_float(self) -> float:
         """Get size as float."""
         return float(self.size)
-    
+
     @property
     def fee_bps(self) -> int:
         """Get fee rate in basis points."""
@@ -421,18 +420,18 @@ class LastTradePriceMessage:
             return int(self.fee_rate_bps)
         except (ValueError, TypeError):
             return 0
-    
+
     @property
     def is_buy(self) -> bool:
         """Check if taker was buying."""
         return self.side.upper() == "BUY"
-    
+
     @property
     def notional(self) -> float:
         """Calculate notional value of trade."""
         return self.price_float * self.size_float
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSONL logging."""
         return {
             "type": "last_trade_price_message",
@@ -445,12 +444,12 @@ class LastTradePriceMessage:
             "fee_rate_bps": self.fee_rate_bps,
             "timestamp": self.timestamp,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "LastTradePriceMessage":
+    def from_dict(cls, data: dict[str, Any]) -> "LastTradePriceMessage":
         """
         Parse from WebSocket message dict.
-        
+
         Expected format:
         {
             "asset_id": "...",
@@ -483,10 +482,10 @@ class LastTradePriceMessage:
 class BestBidAskMessage:
     """
     Best bid/ask update message.
-    
+
     Emitted when the best bid and ask prices for a market change.
     Note: This message is behind the `custom_feature_enabled` flag.
-    
+
     Attributes:
         event_type: Always "best_bid_ask"
         market: Condition ID of market
@@ -503,7 +502,7 @@ class BestBidAskMessage:
     best_ask: str
     spread: str
     timestamp: str
-    
+
     @property
     def ts_ms(self) -> int:
         """Get timestamp as integer milliseconds."""
@@ -511,28 +510,28 @@ class BestBidAskMessage:
             return int(self.timestamp)
         except (ValueError, TypeError):
             return current_ts_ms()
-    
+
     @property
     def best_bid_float(self) -> float:
         """Get best bid as float."""
         return float(self.best_bid)
-    
+
     @property
     def best_ask_float(self) -> float:
         """Get best ask as float."""
         return float(self.best_ask)
-    
+
     @property
     def spread_float(self) -> float:
         """Get spread as float."""
         return float(self.spread)
-    
+
     @property
     def mid_price(self) -> float:
         """Calculate mid-price."""
         return (self.best_bid_float + self.best_ask_float) / 2
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSONL logging."""
         return {
             "type": "best_bid_ask_message",
@@ -544,12 +543,12 @@ class BestBidAskMessage:
             "spread": self.spread,
             "timestamp": self.timestamp,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "BestBidAskMessage":
+    def from_dict(cls, data: dict[str, Any]) -> "BestBidAskMessage":
         """
         Parse from WebSocket message dict.
-        
+
         Expected format:
         {
             "event_type": "best_bid_ask",
@@ -580,10 +579,10 @@ class BestBidAskMessage:
 class TickSizeChangeMessage:
     """
     Tick size change notification.
-    
+
     Emitted when the minimum tick size of the market changes.
     This happens when the book's price reaches the limits: price > 0.96 or price < 0.04
-    
+
     Attributes:
         event_type: Always "tick_size_change"
         asset_id: Token ID
@@ -600,7 +599,7 @@ class TickSizeChangeMessage:
     new_tick_size: str
     side: str
     timestamp: str
-    
+
     @property
     def ts_ms(self) -> int:
         """Get timestamp as integer milliseconds."""
@@ -608,18 +607,18 @@ class TickSizeChangeMessage:
             return int(self.timestamp)
         except (ValueError, TypeError):
             return current_ts_ms()
-    
+
     @property
     def old_tick_size_float(self) -> float:
         """Get old tick size as float."""
         return float(self.old_tick_size)
-    
+
     @property
     def new_tick_size_float(self) -> float:
         """Get new tick size as float."""
         return float(self.new_tick_size)
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSONL logging."""
         return {
             "type": "tick_size_change_message",
@@ -631,12 +630,12 @@ class TickSizeChangeMessage:
             "side": self.side,
             "timestamp": self.timestamp,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "TickSizeChangeMessage":
+    def from_dict(cls, data: dict[str, Any]) -> "TickSizeChangeMessage":
         """
         Parse from WebSocket message dict.
-        
+
         Expected format:
         {
             "event_type": "tick_size_change",
@@ -666,7 +665,7 @@ class TickSizeChangeMessage:
 class EventMessage:
     """
     Event metadata included in new_market and market_resolved messages.
-    
+
     Attributes:
         id: Event message ID
         ticker: Event message ticker
@@ -679,8 +678,8 @@ class EventMessage:
     slug: str
     title: str
     description: str
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         return {
             "id": self.id,
@@ -689,9 +688,9 @@ class EventMessage:
             "title": self.title,
             "description": self.description,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "EventMessage":
+    def from_dict(cls, data: dict[str, Any]) -> "EventMessage":
         """Parse from API response dict."""
         return cls(
             id=data.get("id", ""),
@@ -706,10 +705,10 @@ class EventMessage:
 class NewMarketMessage:
     """
     New market creation notification.
-    
+
     Emitted when a new market is created.
     Note: This message is behind the `custom_feature_enabled` flag.
-    
+
     Attributes:
         event_type: Always "new_market"
         id: Market ID
@@ -730,9 +729,9 @@ class NewMarketMessage:
     description: str
     assets_ids: tuple  # Tuple[str, ...] for immutability
     outcomes: tuple  # Tuple[str, ...] for immutability
-    event_message: Optional[EventMessage]
+    event_message: EventMessage | None
     timestamp: str
-    
+
     @property
     def ts_ms(self) -> int:
         """Get timestamp as integer milliseconds."""
@@ -740,18 +739,18 @@ class NewMarketMessage:
             return int(self.timestamp)
         except (ValueError, TypeError):
             return current_ts_ms()
-    
+
     @property
-    def token_yes(self) -> Optional[str]:
+    def token_yes(self) -> str | None:
         """Get the YES token ID (first asset)."""
         return self.assets_ids[0] if self.assets_ids else None
-    
+
     @property
-    def token_no(self) -> Optional[str]:
+    def token_no(self) -> str | None:
         """Get the NO token ID (second asset)."""
         return self.assets_ids[1] if len(self.assets_ids) > 1 else None
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSONL logging."""
         return {
             "type": "new_market_message",
@@ -766,15 +765,15 @@ class NewMarketMessage:
             "event_message": self.event_message.to_dict() if self.event_message else None,
             "timestamp": self.timestamp,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "NewMarketMessage":
+    def from_dict(cls, data: dict[str, Any]) -> "NewMarketMessage":
         """
         Parse from WebSocket message dict.
         """
         event_msg_raw = data.get("event_message")
         event_message = EventMessage.from_dict(event_msg_raw) if event_msg_raw else None
-        
+
         return cls(
             event_type=data.get("event_type", "new_market"),
             id=data.get("id", ""),
@@ -793,10 +792,10 @@ class NewMarketMessage:
 class MarketResolvedMessage:
     """
     Market resolution notification.
-    
+
     Emitted when a market is resolved.
     Note: This message is behind the `custom_feature_enabled` flag.
-    
+
     Attributes:
         event_type: Always "market_resolved"
         id: Market ID
@@ -821,9 +820,9 @@ class MarketResolvedMessage:
     outcomes: tuple
     winning_asset_id: str
     winning_outcome: str
-    event_message: Optional[EventMessage]
+    event_message: EventMessage | None
     timestamp: str
-    
+
     @property
     def ts_ms(self) -> int:
         """Get timestamp as integer milliseconds."""
@@ -831,8 +830,8 @@ class MarketResolvedMessage:
             return int(self.timestamp)
         except (ValueError, TypeError):
             return current_ts_ms()
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSONL logging."""
         return {
             "type": "market_resolved_message",
@@ -845,13 +844,13 @@ class MarketResolvedMessage:
             "winning_outcome": self.winning_outcome,
             "timestamp": self.timestamp,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "MarketResolvedMessage":
+    def from_dict(cls, data: dict[str, Any]) -> "MarketResolvedMessage":
         """Parse from WebSocket message dict."""
         event_msg_raw = data.get("event_message")
         event_message = EventMessage.from_dict(event_msg_raw) if event_msg_raw else None
-        
+
         return cls(
             event_type=data.get("event_type", "market_resolved"),
             id=data.get("id", ""),
@@ -873,18 +872,18 @@ class MarketResolvedMessage:
 # =============================================================================
 
 # Union type for all possible WebSocket messages
-PolymarketWSMessage = Union[
-    BookMessage,
-    PriceChangeMessage,
-    LastTradePriceMessage,
-    BestBidAskMessage,
-    TickSizeChangeMessage,
-    NewMarketMessage,
-    MarketResolvedMessage,
-]
+PolymarketWSMessage = (
+    BookMessage
+    | PriceChangeMessage
+    | LastTradePriceMessage
+    | BestBidAskMessage
+    | TickSizeChangeMessage
+    | NewMarketMessage
+    | MarketResolvedMessage
+)
 
 # Mapping of event_type to parser class
-_MESSAGE_PARSERS: Dict[str, type] = {
+_MESSAGE_PARSERS: dict[str, type] = {
     "book": BookMessage,
     "price_change": PriceChangeMessage,
     "last_trade_price": LastTradePriceMessage,
@@ -895,40 +894,40 @@ _MESSAGE_PARSERS: Dict[str, type] = {
 }
 
 
-def parse_ws_message(data: Dict[str, Any]) -> Optional[PolymarketWSMessage]:
+def parse_ws_message(data: dict[str, Any]) -> PolymarketWSMessage | None:
     """
     Parse a WebSocket message into the appropriate typed model.
-    
+
     Args:
         data: Raw message dictionary from WebSocket
-        
+
     Returns:
         Typed message object, or None if unknown/invalid message type
-        
+
     Example:
         >>> msg = parse_ws_message({"event_type": "book", "asset_id": "...", ...})
         >>> if isinstance(msg, BookMessage):
         ...     print(f"Best bid: {msg.best_bid_price}")
     """
     event_type = data.get("event_type", data.get("type", ""))
-    
+
     parser_class = _MESSAGE_PARSERS.get(event_type)
     if parser_class is None:
         return None
-    
+
     try:
         return parser_class.from_dict(data)
     except Exception:
         return None
 
 
-def parse_ws_messages(raw: str) -> List[PolymarketWSMessage]:
+def parse_ws_messages(raw: str) -> list[PolymarketWSMessage]:
     """
     Parse a raw WebSocket message string (may be single message or batch).
-    
+
     Args:
         raw: Raw JSON string from WebSocket
-        
+
     Returns:
         List of parsed message objects (empty if parse error)
     """
@@ -936,7 +935,7 @@ def parse_ws_messages(raw: str) -> List[PolymarketWSMessage]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return []
-    
+
     # Handle batch messages (array)
     if isinstance(data, list):
         messages = []
@@ -945,10 +944,10 @@ def parse_ws_messages(raw: str) -> List[PolymarketWSMessage]:
             if msg is not None:
                 messages.append(msg)
         return messages
-    
+
     # Handle single message
     if isinstance(data, dict):
         msg = parse_ws_message(data)
         return [msg] if msg is not None else []
-    
+
     return []

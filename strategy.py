@@ -8,17 +8,16 @@ and override `on_market_data_update` to implement option pricing or other logic.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
+from logging_utils import get_logger
 from models import (
     ChainlinkPriceTick,
     MarketPriceTick,
     MarketSpec,
     PriceTick,
-    current_ts_ms,
 )
-from logging_utils import get_logger
 
 logger = get_logger("strategy")
 
@@ -46,19 +45,19 @@ class MarketDataUpdate:
     """
 
     timestamp_ms: int
-    binance_ticks: Dict[str, PriceTick] = field(default_factory=dict)
-    chainlink_ticks: Dict[str, ChainlinkPriceTick] = field(default_factory=dict)
-    polymarket_ticks: Dict[str, MarketPriceTick] = field(default_factory=dict)
-    markets: Dict[str, MarketSpec] = field(default_factory=dict)
-    markets_by_series: Dict[str, MarketSpec] = field(default_factory=dict)
-    polymarket_by_series: Dict[str, Dict[str, MarketPriceTick]] = field(default_factory=dict)
-    usdt_usd_rate: Optional[float] = None
-    usdt_usd_tick: Optional[PriceTick] = None
+    binance_ticks: dict[str, PriceTick] = field(default_factory=dict)
+    chainlink_ticks: dict[str, ChainlinkPriceTick] = field(default_factory=dict)
+    polymarket_ticks: dict[str, MarketPriceTick] = field(default_factory=dict)
+    markets: dict[str, MarketSpec] = field(default_factory=dict)
+    markets_by_series: dict[str, MarketSpec] = field(default_factory=dict)
+    polymarket_by_series: dict[str, dict[str, MarketPriceTick]] = field(default_factory=dict)
+    usdt_usd_rate: float | None = None
+    usdt_usd_tick: PriceTick | None = None
     trigger_source: str = "mixed"
 
     # ── convenience helpers ──────────────────────────────────────────────
 
-    def binance_price_usd(self, coin: str) -> Optional[float]:
+    def binance_price_usd(self, coin: str) -> float | None:
         """Return the Binance mid-price for *coin* converted to USD."""
         tick = self.binance_ticks.get(coin.upper())
         if tick and self.usdt_usd_rate:
@@ -72,11 +71,11 @@ class MarketDataUpdate:
         bucket = self.polymarket_by_series.get(series_key.upper(), {})
         return bucket.get("UP"), bucket.get("DOWN")
 
-    def series_keys(self) -> List[str]:
+    def series_keys(self) -> list[str]:
         """Return sorted list of available series keys."""
         return sorted(self.markets_by_series.keys())
 
-    def unified_snapshot(self, series_key: str) -> Dict[str, Any]:
+    def unified_snapshot(self, series_key: str) -> dict[str, Any]:
         """Build a dict identical to ``ConnectorOrchestrator.get_unified_snapshot``."""
         series_key = series_key.upper()
         market = self.markets_by_series.get(series_key)
@@ -165,7 +164,7 @@ class LoggingStrategy(BaseStrategy):
         self._update_count += 1
 
         if self._update_count % 100 == 0:
-            now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            now = datetime.now(UTC).strftime("%H:%M:%S")
             series = ", ".join(update.series_keys()) or "none"
             self._logger.info(
                 f"[{now}] update #{self._update_count} | "
