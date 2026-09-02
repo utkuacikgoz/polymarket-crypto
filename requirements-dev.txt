@@ -1,7 +1,7 @@
 -r requirements.txt
 
 # Lint / security / coverage tooling (mirrors CI)
-ruff>=0.6
+ruff>=0.16.5
 bandit>=1.9.4
 pip-audit>=2.7
 pytest>=9.1.1
