@@ -14,4 +14,4 @@ pytest-cov>=7.1.0
 mypy>=2.3.0
 
 # Development utilities (optional)
-python-dotenv>=1.2.2
+python-dotenv>=1.2.3
